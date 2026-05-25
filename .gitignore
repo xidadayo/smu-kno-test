@@ -1,0 +1,9 @@
+node_modules/
+dist/
+.env
+data/store.json
+uploads/
+npm-debug.log*
+*.log
+framework.docx
+framework.txt

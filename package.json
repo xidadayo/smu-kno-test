@@ -1,0 +1,31 @@
+{
+  "name": "smu-kno-test",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Knowledge-base learning and staged exam system MVP.",
+  "type": "module",
+  "scripts": {
+    "dev": "concurrently -k \"npm:dev:server\" \"npm:dev:web\"",
+    "dev:server": "node --watch server/index.js",
+    "dev:web": "vite --host 0.0.0.0",
+    "build": "vite build",
+    "start": "cross-env NODE_ENV=production node server/index.js",
+    "start:win": "cross-env NODE_ENV=production node server/index.js",
+    "check": "npm run build && node server/smoke-test.js"
+  },
+  "dependencies": {
+    "@vitejs/plugin-react": "^5.1.1",
+    "concurrently": "^9.2.1",
+    "cors": "^2.8.5",
+    "cross-env": "^10.1.0",
+    "express": "^5.2.1",
+    "lucide-react": "^0.561.0",
+    "multer": "^2.0.2",
+    "react": "^19.2.3",
+    "react-dom": "^19.2.3",
+    "vite": "^7.3.0"
+  },
+  "devDependencies": {
+    "playwright": "^1.60.0"
+  }
+}
