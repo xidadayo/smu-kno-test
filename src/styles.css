@@ -593,6 +593,87 @@ textarea {
   color: var(--red);
 }
 
+.data-center {
+  display: grid;
+  gap: 18px;
+}
+
+.collection-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.collection-tabs button {
+  min-height: 36px;
+}
+
+.collection-tabs button.active {
+  background: var(--teal);
+  border-color: var(--teal);
+  color: white;
+}
+
+.collection-tabs span {
+  display: inline-grid;
+  place-items: center;
+  min-width: 22px;
+  height: 22px;
+  border-radius: 8px;
+  background: rgba(15, 118, 110, 0.12);
+  font-size: 12px;
+}
+
+.collection-tabs button.active span {
+  background: rgba(255, 255, 255, 0.18);
+}
+
+.record-list {
+  display: grid;
+  gap: 10px;
+}
+
+.record-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-soft);
+}
+
+.record-row strong,
+.record-row span {
+  display: block;
+}
+
+.record-row span {
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.row-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.danger-button {
+  color: var(--red);
+  border-color: #f3b8b3;
+  background: #fff7f6;
+}
+
+.json-editor {
+  min-height: 360px;
+  font-family: Consolas, Monaco, monospace;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
 .empty {
   min-height: 300px;
   display: grid;

@@ -13,6 +13,7 @@ import {
   LayoutDashboard,
   ListChecks,
   LogOut,
+  Database,
   Plus,
   RefreshCw,
   Search,
@@ -45,7 +46,8 @@ const adminNav = [
   { key: 'knowledge', label: '知识库', icon: BookOpen },
   { key: 'review', label: 'AI 审核', icon: Bot },
   { key: 'plans', label: '计划', icon: ListChecks },
-  { key: 'monitor', label: '监控', icon: ShieldAlert }
+  { key: 'monitor', label: '监控', icon: ShieldAlert },
+  { key: 'data', label: '数据', icon: Database }
 ];
 
 const learnerNav = [
@@ -62,6 +64,7 @@ function useSystemData(user) {
     exams: [],
     violations: [],
     pushes: [],
+    adminCollections: {},
     myLearning: null,
     myExams: []
   });
@@ -74,16 +77,17 @@ function useSystemData(user) {
       const [myLearning, myExams] = await Promise.all([api('/api/my/learning'), api('/api/my/exams')]);
       setData((current) => ({ ...current, myLearning, myExams }));
     } else {
-      const [summary, learners, knowledge, plans, exams, violations, pushes] = await Promise.all([
+      const [summary, learners, knowledge, plans, exams, violations, pushes, adminCollections] = await Promise.all([
         api('/api/summary'),
         api('/api/learners'),
         api('/api/knowledge'),
         api('/api/plans'),
         api('/api/exams'),
         api('/api/violations'),
-        api('/api/push-records')
+        api('/api/push-records'),
+        api('/api/admin/collections')
       ]);
-      setData({ summary, learners, knowledge, plans, exams, violations, pushes, myLearning: null, myExams: [] });
+      setData({ summary, learners, knowledge, plans, exams, violations, pushes, adminCollections, myLearning: null, myExams: [] });
     }
     setLoading(false);
   };
@@ -117,6 +121,8 @@ function App() {
     learn: <LearningDesk data={data} user={user} onRefresh={refresh} />,
     exam: <ExamDesk data={data} user={user} onRefresh={refresh} />,
     monitor: <Monitor data={data} />
+    ,
+    data: <DataCenter data={data} onRefresh={refresh} />
   }[active];
 
   const logout = () => {
@@ -687,6 +693,97 @@ function Monitor({ data }) {
           <p>所有违规事件都会进入审计链路，供阅卷老师和管理员复核。</p>
         </div>
       </Panel>
+    </section>
+  );
+}
+
+const collectionLabels = {
+  users: '账号',
+  documents: '知识库文档',
+  knowledgePoints: '知识点',
+  questions: '题库',
+  learningPlans: '学习计划',
+  progress: '学习进度',
+  examTasks: '考试任务',
+  examAttempts: '考试提交',
+  violations: '违规记录',
+  pushRecords: '推送记录',
+  auditLogs: '审计日志'
+};
+
+function DataCenter({ data, onRefresh }) {
+  const collections = data.adminCollections || {};
+  const names = Object.keys(collectionLabels).filter((name) => Array.isArray(collections[name]));
+  const [activeCollection, setActiveCollection] = useState(names[0] || 'users');
+  const [editing, setEditing] = useState(null);
+  const [draft, setDraft] = useState('');
+  const records = collections[activeCollection] || [];
+
+  useEffect(() => {
+    if (!names.includes(activeCollection) && names[0]) setActiveCollection(names[0]);
+  }, [names.join('|')]);
+
+  const startEdit = (record) => {
+    setEditing(record.id);
+    setDraft(JSON.stringify(record, null, 2));
+  };
+
+  const saveEdit = async () => {
+    const payload = JSON.parse(draft);
+    await api(`/api/admin/${activeCollection}/${editing}`, {
+      method: 'PATCH',
+      body: JSON.stringify(payload)
+    });
+    setEditing(null);
+    setDraft('');
+    onRefresh();
+  };
+
+  const deleteRecord = async (record) => {
+    if (!window.confirm(`确认删除 ${record.name || record.title || record.id}？`)) return;
+    await api(`/api/admin/${activeCollection}/${record.id}`, { method: 'DELETE' });
+    onRefresh();
+  };
+
+  return (
+    <section className="data-center">
+      <Panel title="数据集合">
+        <div className="collection-tabs">
+          {names.map((name) => (
+            <button className={activeCollection === name ? 'active' : ''} key={name} onClick={() => setActiveCollection(name)}>
+              {collectionLabels[name]}
+              <span>{collections[name]?.length || 0}</span>
+            </button>
+          ))}
+        </div>
+      </Panel>
+
+      <Panel title={`${collectionLabels[activeCollection]}维护`}>
+        <div className="record-list">
+          {records.map((record) => (
+            <article className="record-row" key={record.id}>
+              <div>
+                <strong>{record.name || record.title || record.account || record.id}</strong>
+                <span>{record.department || record.status || record.role || record.type || record.createdAt || '-'}</span>
+              </div>
+              <div className="row-actions">
+                <button onClick={() => startEdit(record)}>编辑</button>
+                <button className="danger-button" onClick={() => deleteRecord(record)}>删除</button>
+              </div>
+            </article>
+          ))}
+        </div>
+      </Panel>
+
+      {editing && (
+        <Panel title="编辑 JSON">
+          <textarea className="json-editor" value={draft} onChange={(event) => setDraft(event.target.value)} />
+          <div className="action-row">
+            <button className="primary" onClick={saveEdit}>保存修改</button>
+            <button onClick={() => setEditing(null)}>取消</button>
+          </div>
+        </Panel>
+      )}
     </section>
   );
 }

@@ -25,6 +25,19 @@ if (process.env.NODE_ENV === 'production') {
 
 const actor = (req) => req.header('x-user-id') || 'u_admin';
 const sanitizeLearner = (user) => sanitizeUser(user);
+const collectionMap = {
+  users: 'users',
+  documents: 'documents',
+  knowledgePoints: 'knowledgePoints',
+  questions: 'questions',
+  learningPlans: 'learningPlans',
+  progress: 'progress',
+  examTasks: 'examTasks',
+  examAttempts: 'examAttempts',
+  violations: 'violations',
+  pushRecords: 'pushRecords',
+  auditLogs: 'auditLogs'
+};
 
 function userFromRequest(req, store) {
   return store.users.find((user) => user.id === actor(req));
@@ -469,6 +482,99 @@ app.get('/api/audit-logs', (_req, res) => {
 
 app.get('/api/push-records', (_req, res) => {
   res.json(readStore().pushRecords);
+});
+
+app.get('/api/admin/collections', (_req, res) => {
+  const store = readStore();
+  res.json(
+    Object.fromEntries(
+      Object.entries(collectionMap).map(([key, storeKey]) => [
+        key,
+        storeKey === 'users' ? store[storeKey].map(sanitizeUser) : store[storeKey]
+      ])
+    )
+  );
+});
+
+app.patch('/api/admin/:collection/:id', (req, res) => {
+  const storeKey = collectionMap[req.params.collection];
+  if (!storeKey) return res.status(404).json({ error: 'collection not found' });
+
+  const updated = mutateStore((store) => {
+    const list = store[storeKey];
+    const item = list.find((entry) => entry.id === req.params.id);
+    if (!item) return null;
+    const next = { ...req.body };
+    delete next.id;
+    delete next.passwordHash;
+    Object.assign(item, next, { updatedAt: now() });
+    if (storeKey === 'users' && next.initialPassword) {
+      item.passwordHash = hashPassword(next.initialPassword);
+    }
+    logAudit(store, 'admin.collection.update', actor(req), { collection: req.params.collection, id: req.params.id });
+    return storeKey === 'users' ? sanitizeUser(item) : item;
+  });
+
+  if (!updated) return res.status(404).json({ error: 'record not found' });
+  res.json(updated);
+});
+
+app.delete('/api/admin/:collection/:id', (req, res) => {
+  const storeKey = collectionMap[req.params.collection];
+  if (!storeKey) return res.status(404).json({ error: 'collection not found' });
+  if (storeKey === 'users' && req.params.id === 'u_admin') {
+    return res.status(400).json({ error: 'default admin cannot be deleted' });
+  }
+
+  const deleted = mutateStore((store) => {
+    const list = store[storeKey];
+    const index = list.findIndex((entry) => entry.id === req.params.id);
+    if (index === -1) return null;
+    const [item] = list.splice(index, 1);
+
+    if (storeKey === 'users') {
+      store.progress = store.progress.filter((entry) => entry.userId !== item.id);
+      store.examTasks = store.examTasks.filter((entry) => entry.userId !== item.id);
+      store.examAttempts = store.examAttempts.filter((entry) => entry.userId !== item.id);
+      store.violations = store.violations.filter((entry) => entry.userId !== item.id);
+      store.pushRecords = store.pushRecords.filter((entry) => entry.userId !== item.id);
+    }
+
+    if (storeKey === 'documents') {
+      const kpIds = new Set(store.knowledgePoints.filter((entry) => entry.documentId === item.id).map((entry) => entry.id));
+      const questionIds = new Set(store.questions.filter((entry) => kpIds.has(entry.knowledgePointId)).map((entry) => entry.id));
+      store.knowledgePoints = store.knowledgePoints.filter((entry) => entry.documentId !== item.id);
+      store.questions = store.questions.filter((entry) => !kpIds.has(entry.knowledgePointId));
+      store.examTasks.forEach((exam) => {
+        exam.questionIds = (exam.questionIds || []).filter((questionId) => !questionIds.has(questionId));
+      });
+    }
+
+    if (storeKey === 'knowledgePoints') {
+      const questionIds = new Set(store.questions.filter((entry) => entry.knowledgePointId === item.id).map((entry) => entry.id));
+      store.questions = store.questions.filter((entry) => entry.knowledgePointId !== item.id);
+      store.examTasks.forEach((exam) => {
+        exam.questionIds = (exam.questionIds || []).filter((questionId) => !questionIds.has(questionId));
+      });
+    }
+
+    if (storeKey === 'questions') {
+      store.examTasks.forEach((exam) => {
+        exam.questionIds = (exam.questionIds || []).filter((questionId) => questionId !== item.id);
+      });
+    }
+
+    if (storeKey === 'learningPlans') {
+      store.progress = store.progress.filter((entry) => entry.planId !== item.id);
+      store.examTasks = store.examTasks.filter((entry) => entry.planId !== item.id);
+    }
+
+    logAudit(store, 'admin.collection.delete', actor(req), { collection: req.params.collection, id: req.params.id });
+    return item;
+  });
+
+  if (!deleted) return res.status(404).json({ error: 'record not found' });
+  res.json({ deleted: true, id: req.params.id });
 });
 
 if (process.env.NODE_ENV === 'production') {
