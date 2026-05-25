@@ -83,6 +83,10 @@ function summary(store) {
   };
 }
 
+function visibleForDepartment(item, department) {
+  return !item.department || item.department === '全公司' || item.department === department;
+}
+
 app.get('/api/health', (_req, res) => {
   res.json({ status: 'ok', time: now() });
 });
@@ -194,9 +198,9 @@ app.post('/api/learners/import', (req, res) => {
 app.get('/api/knowledge', (_req, res) => {
   const store = readStore();
   res.json({
-    documents: store.documents,
-    knowledgePoints: store.knowledgePoints,
-    questions: store.questions
+    documents: store.documents.map((item) => ({ department: '全公司', ...item })),
+    knowledgePoints: store.knowledgePoints.map((item) => ({ department: '全公司', ...item })),
+    questions: store.questions.map((item) => ({ department: '全公司', ...item }))
   });
 });
 
@@ -206,9 +210,11 @@ app.post('/api/documents/upload', upload.single('file'), async (req, res) => {
   const documentId = idForDocument();
   const generated = await generateFromFile(req.file, documentId);
   const result = mutateStore((store, helpers) => {
+    const department = req.body.department || '全公司';
     const document = {
       id: documentId,
       title: req.body.title || req.file.originalname,
+      department,
       type: path.extname(req.file.originalname).replace('.', '') || 'file',
       status: generated.aiError ? 'processed_with_fallback' : 'processed',
       filePath: req.file.path,
@@ -219,6 +225,12 @@ app.post('/api/documents/upload', upload.single('file'), async (req, res) => {
       aiError: generated.aiError,
       createdAt: helpers.now()
     };
+    generated.knowledgePoints.forEach((item) => {
+      item.department = department;
+    });
+    generated.questions.forEach((item) => {
+      item.department = department;
+    });
     store.documents.unshift(document);
     store.knowledgePoints.unshift(...generated.knowledgePoints);
     store.questions.unshift(...generated.questions);
@@ -311,8 +323,9 @@ app.post('/api/progress', (req, res) => {
     if (progress.status === 'completed') {
       const existingExam = store.examTasks.find((item) => item.userId === progress.userId && item.stage === progress.stage);
       if (!existingExam) {
+        const learner = store.users.find((user) => user.id === progress.userId);
         const questions = store.questions
-          .filter((question) => question.status === 'approved' && question.stage === progress.stage)
+          .filter((question) => question.status === 'approved' && question.stage === progress.stage && visibleForDepartment(question, learner?.department))
           .map((question) => question.id)
           .slice(0, 5);
         const exam = {
@@ -369,7 +382,7 @@ app.get('/api/my/learning', (req, res) => {
     user: sanitizeUser(user),
     progress,
     plans,
-    knowledgePoints: store.knowledgePoints.filter((item) => item.status === 'approved' && item.stage === currentStage)
+    knowledgePoints: store.knowledgePoints.filter((item) => item.status === 'approved' && item.stage === currentStage && visibleForDepartment(item, user.department))
   });
 });
 

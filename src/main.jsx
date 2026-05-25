@@ -356,7 +356,9 @@ function Learners({ data, onRefresh }) {
 function Knowledge({ data, onRefresh }) {
   const [file, setFile] = useState(null);
   const [title, setTitle] = useState('');
+  const [department, setDepartment] = useState('全公司');
   const [busy, setBusy] = useState(false);
+  const departments = useMemo(() => ['全公司', ...new Set(data.learners.map((item) => item.department).filter(Boolean))], [data.learners]);
 
   const upload = async (event) => {
     event.preventDefault();
@@ -365,6 +367,7 @@ function Knowledge({ data, onRefresh }) {
     const fd = new FormData();
     fd.append('file', file);
     fd.append('title', title || file.name);
+    fd.append('department', department);
     await api('/api/documents/upload', { method: 'POST', body: fd });
     setBusy(false);
     setFile(null);
@@ -378,6 +381,11 @@ function Knowledge({ data, onRefresh }) {
         <form className="upload-box" onSubmit={upload}>
           <FileUp size={28} />
           <input placeholder="文档标题" value={title} onChange={(event) => setTitle(event.target.value)} />
+          <select value={department} onChange={(event) => setDepartment(event.target.value)}>
+            {departments.map((item) => (
+              <option key={item} value={item}>{item}</option>
+            ))}
+          </select>
           <input type="file" onChange={(event) => setFile(event.target.files?.[0])} />
           <button className="primary" disabled={!file || busy}>
             {busy ? 'DeepSeek 生成中...' : '上传并生成待审核内容'}
@@ -387,8 +395,8 @@ function Knowledge({ data, onRefresh }) {
 
       <Panel title="知识库文档">
         <DataTable
-          columns={['标题', '类型', '状态', 'AI 模型', '上传时间']}
-          rows={data.knowledge.documents.map((doc) => [doc.title, doc.type, doc.status, doc.aiModel || '-', formatTime(doc.createdAt)])}
+          columns={['标题', '归属部门', '类型', '状态', 'AI 模型', '上传时间']}
+          rows={data.knowledge.documents.map((doc) => [doc.title, doc.department || '全公司', doc.type, doc.status, doc.aiModel || '-', formatTime(doc.createdAt)])}
         />
       </Panel>
     </section>
@@ -735,7 +743,7 @@ function ReviewItem({ item, title, meta, onApprove }) {
       <div>
         <h3>{title || item.title}</h3>
         <p>{item.summary || item.analysis}</p>
-        <small>{meta || `${item.stage} · ${item.difficulty} · 置信度 ${Math.round(item.confidence * 100)}% · ${item.generatedBy || 'AI'}`}</small>
+        <small>{meta || `${item.department || '全公司'} · ${item.stage} · ${item.difficulty} · 置信度 ${Math.round(item.confidence * 100)}% · ${item.generatedBy || 'AI'}`}</small>
       </div>
       <button disabled={item.status === 'approved'} onClick={onApprove}>
         {item.status === 'approved' ? '已通过' : '通过'}
