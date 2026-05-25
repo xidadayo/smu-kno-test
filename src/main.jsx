@@ -12,6 +12,7 @@ import {
   GraduationCap,
   LayoutDashboard,
   ListChecks,
+  LogOut,
   Plus,
   RefreshCw,
   Search,
@@ -21,27 +22,38 @@ import {
 } from 'lucide-react';
 import './styles.css';
 
+const storedUser = () => {
+  try {
+    return JSON.parse(localStorage.getItem('smu-user') || 'null');
+  } catch {
+    return null;
+  }
+};
+
 const api = async (path, options = {}) => {
-  const res = await fetch(path, {
-    headers: options.body instanceof FormData ? {} : { 'Content-Type': 'application/json' },
-    ...options
-  });
+  const user = storedUser();
+  const headers = options.body instanceof FormData ? {} : { 'Content-Type': 'application/json' };
+  if (user?.id) headers['x-user-id'] = user.id;
+  const res = await fetch(path, { headers, ...options });
   if (!res.ok) throw new Error(await res.text());
   return res.json();
 };
 
-const navItems = [
+const adminNav = [
   { key: 'dashboard', label: '总览', icon: LayoutDashboard },
   { key: 'learners', label: '账号', icon: Users },
   { key: 'knowledge', label: '知识库', icon: BookOpen },
   { key: 'review', label: 'AI 审核', icon: Bot },
   { key: 'plans', label: '计划', icon: ListChecks },
-  { key: 'learn', label: '学习端', icon: GraduationCap },
-  { key: 'exam', label: '考试端', icon: ClipboardCheck },
   { key: 'monitor', label: '监控', icon: ShieldAlert }
 ];
 
-function useSystemData() {
+const learnerNav = [
+  { key: 'learn', label: '我的学习', icon: GraduationCap },
+  { key: 'exam', label: '我的考试', icon: ClipboardCheck }
+];
+
+function useSystemData(user) {
   const [data, setData] = useState({
     summary: null,
     learners: [],
@@ -49,46 +61,68 @@ function useSystemData() {
     plans: [],
     exams: [],
     violations: [],
-    pushes: []
+    pushes: [],
+    myLearning: null,
+    myExams: []
   });
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(false);
 
   const refresh = async () => {
+    if (!user) return;
     setLoading(true);
-    const [summary, learners, knowledge, plans, exams, violations, pushes] = await Promise.all([
-      api('/api/summary'),
-      api('/api/learners'),
-      api('/api/knowledge'),
-      api('/api/plans'),
-      api('/api/exams'),
-      api('/api/violations'),
-      api('/api/push-records')
-    ]);
-    setData({ summary, learners, knowledge, plans, exams, violations, pushes });
+    if (user.role === 'learner') {
+      const [myLearning, myExams] = await Promise.all([api('/api/my/learning'), api('/api/my/exams')]);
+      setData((current) => ({ ...current, myLearning, myExams }));
+    } else {
+      const [summary, learners, knowledge, plans, exams, violations, pushes] = await Promise.all([
+        api('/api/summary'),
+        api('/api/learners'),
+        api('/api/knowledge'),
+        api('/api/plans'),
+        api('/api/exams'),
+        api('/api/violations'),
+        api('/api/push-records')
+      ]);
+      setData({ summary, learners, knowledge, plans, exams, violations, pushes, myLearning: null, myExams: [] });
+    }
     setLoading(false);
   };
 
   useEffect(() => {
     refresh();
-  }, []);
+  }, [user?.id]);
 
   return { data, loading, refresh };
 }
 
 function App() {
-  const [active, setActive] = useState('dashboard');
-  const { data, loading, refresh } = useSystemData();
+  const [user, setUser] = useState(storedUser);
+  const [active, setActive] = useState(user?.role === 'learner' ? 'learn' : 'dashboard');
+  const { data, loading, refresh } = useSystemData(user);
 
+  useEffect(() => {
+    if (!user) return;
+    setActive(user.role === 'learner' ? 'learn' : 'dashboard');
+  }, [user?.id]);
+
+  if (!user) return <Login onLogin={setUser} />;
+
+  const navItems = user.role === 'learner' ? learnerNav : adminNav;
   const page = {
     dashboard: <Dashboard data={data} loading={loading} onRefresh={refresh} />,
     learners: <Learners data={data} onRefresh={refresh} />,
     knowledge: <Knowledge data={data} onRefresh={refresh} />,
     review: <Review data={data} onRefresh={refresh} />,
     plans: <Plans data={data} onRefresh={refresh} />,
-    learn: <LearningDesk data={data} onRefresh={refresh} />,
-    exam: <ExamDesk data={data} onRefresh={refresh} />,
+    learn: <LearningDesk data={data} user={user} onRefresh={refresh} />,
+    exam: <ExamDesk data={data} user={user} onRefresh={refresh} />,
     monitor: <Monitor data={data} />
   }[active];
+
+  const logout = () => {
+    localStorage.removeItem('smu-user');
+    setUser(null);
+  };
 
   return (
     <div className="app-shell">
@@ -111,19 +145,29 @@ function App() {
             );
           })}
         </nav>
+        <div className="account-box">
+          <strong>{user.name}</strong>
+          <span>{roleText(user.role)} · {user.account}</span>
+          <button onClick={logout}>
+            <LogOut size={16} />
+            退出登录
+          </button>
+        </div>
       </aside>
 
       <main>
         <header className="topbar">
           <div>
             <h1>{navItems.find((item) => item.key === active)?.label}</h1>
-            <p>上传知识库、审核 AI 内容、追踪学习进度并生成阶段考试。</p>
+            <p>{user.role === 'learner' ? '查看个人学习任务、完成阶段学习并参加考试。' : '上传知识库、审核 AI 内容、追踪学习进度并生成阶段考试。'}</p>
           </div>
           <div className="top-actions">
-            <label className="search">
-              <Search size={16} />
-              <input placeholder="搜索学员、知识点、考试" />
-            </label>
+            {user.role !== 'learner' && (
+              <label className="search">
+                <Search size={16} />
+                <input placeholder="搜索学员、知识点、考试" />
+              </label>
+            )}
             <button className="icon-button" onClick={refresh} title="刷新">
               <RefreshCw size={18} />
             </button>
@@ -132,6 +176,57 @@ function App() {
         {page}
       </main>
     </div>
+  );
+}
+
+function Login({ onLogin }) {
+  const [account, setAccount] = useState('admin');
+  const [password, setPassword] = useState('admin123');
+  const [error, setError] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  const submit = async (event) => {
+    event.preventDefault();
+    setBusy(true);
+    setError('');
+    try {
+      const result = await api('/api/auth/login', {
+        method: 'POST',
+        body: JSON.stringify({ account, password })
+      });
+      localStorage.setItem('smu-user', JSON.stringify(result.user));
+      onLogin(result.user);
+    } catch {
+      setError('账号或密码错误');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <main className="login-page">
+      <section className="login-card">
+        <div className="brand-mark">知</div>
+        <h1>知识库学习与考核系统</h1>
+        <p>管理员审核 AI 生成内容；学员登录后只进入自己的学习与考试。</p>
+        <form onSubmit={submit}>
+          <label>
+            <span>账号</span>
+            <input value={account} onChange={(event) => setAccount(event.target.value)} />
+          </label>
+          <label>
+            <span>密码</span>
+            <input type="password" value={password} onChange={(event) => setPassword(event.target.value)} />
+          </label>
+          {error && <div className="form-error">{error}</div>}
+          <button className="primary" disabled={busy}>{busy ? '登录中...' : '登录'}</button>
+        </form>
+        <div className="login-hints">
+          <span>管理员：admin / admin123</span>
+          <span>学员：SMU1001 / 123456</span>
+        </div>
+      </section>
+    </main>
   );
 }
 
@@ -208,13 +303,13 @@ function Dashboard({ data, loading, onRefresh }) {
 }
 
 function Learners({ data, onRefresh }) {
-  const [form, setForm] = useState({ name: '', account: '', department: '', position: '', feishuUserId: '' });
+  const [form, setForm] = useState({ name: '', account: '', department: '', position: '', feishuUserId: '', initialPassword: '123456' });
   const [csv, setCsv] = useState('王一,SMU1003,运营部,质检专员,ou_demo');
 
   const create = async (event) => {
     event.preventDefault();
     await api('/api/learners', { method: 'POST', body: JSON.stringify(form) });
-    setForm({ name: '', account: '', department: '', position: '', feishuUserId: '' });
+    setForm({ name: '', account: '', department: '', position: '', feishuUserId: '', initialPassword: '123456' });
     onRefresh();
   };
 
@@ -227,7 +322,7 @@ function Learners({ data, onRefresh }) {
     <section className="page-grid">
       <Panel title="创建学员账号">
         <form className="form-grid" onSubmit={create}>
-          {['name', 'account', 'department', 'position', 'feishuUserId'].map((key) => (
+          {['name', 'account', 'department', 'position', 'feishuUserId', 'initialPassword'].map((key) => (
             <label key={key}>
               <span>{fieldLabel(key)}</span>
               <input value={form[key]} onChange={(event) => setForm({ ...form, [key]: event.target.value })} required={key !== 'feishuUserId'} />
@@ -250,8 +345,8 @@ function Learners({ data, onRefresh }) {
 
       <Panel title="账号列表" className="wide-panel">
         <DataTable
-          columns={['姓名', '账号', '部门', '岗位', '飞书 ID', '状态']}
-          rows={data.learners.map((item) => [item.name, item.account, item.department, item.position, item.feishuUserId || '-', item.status])}
+          columns={['姓名', '账号', '初始密码', '部门', '岗位', '飞书 ID', '状态']}
+          rows={data.learners.map((item) => [item.name, item.account, item.initialPassword || '已设置', item.department, item.position, item.feishuUserId || '-', item.status])}
         />
       </Panel>
     </section>
@@ -285,15 +380,15 @@ function Knowledge({ data, onRefresh }) {
           <input placeholder="文档标题" value={title} onChange={(event) => setTitle(event.target.value)} />
           <input type="file" onChange={(event) => setFile(event.target.files?.[0])} />
           <button className="primary" disabled={!file || busy}>
-            {busy ? '生成中...' : '上传并模拟 AI 生成'}
+            {busy ? 'DeepSeek 生成中...' : '上传并生成待审核内容'}
           </button>
         </form>
       </Panel>
 
       <Panel title="知识库文档">
         <DataTable
-          columns={['标题', '类型', '状态', '上传时间']}
-          rows={data.knowledge.documents.map((doc) => [doc.title, doc.type, doc.status, formatTime(doc.createdAt)])}
+          columns={['标题', '类型', '状态', 'AI 模型', '上传时间']}
+          rows={data.knowledge.documents.map((doc) => [doc.title, doc.type, doc.status, doc.aiModel || '-', formatTime(doc.createdAt)])}
         />
       </Panel>
     </section>
@@ -388,32 +483,50 @@ function Plans({ data, onRefresh }) {
   );
 }
 
-function LearningDesk({ data, onRefresh }) {
-  const learner = data.learners[0];
-  const plan = data.plans[0];
-  const approved = data.knowledge.knowledgePoints.filter((item) => item.status === 'approved');
+function LearningDesk({ data, user, onRefresh }) {
+  const learning = data.myLearning;
+  const plan = learning?.plans?.[0];
+  const progress = learning?.progress?.[0];
+  const approved = learning?.knowledgePoints || [];
+  const [reading, setReading] = useState(false);
+  const [percent, setPercent] = useState(progress?.percent || 0);
 
-  const complete = async () => {
+  useEffect(() => {
+    setPercent(progress?.percent || 0);
+  }, [progress?.percent]);
+
+  const recordProgress = async (nextPercent) => {
+    if (!plan) return;
     await api('/api/progress', {
       method: 'POST',
       body: JSON.stringify({
-        userId: learner.id,
+        userId: user.id,
         planId: plan.id,
-        stage: 'L1',
-        difficulty: 'L1',
-        percent: 95,
-        effectiveSeconds: 300,
+        stage: progress?.stage || user.stage || 'L1',
+        difficulty: progress?.difficulty || user.difficulty || 'L1',
+        percent: nextPercent,
+        effectiveSeconds: 180,
         lastPosition: approved[0]?.id
       })
     });
     onRefresh();
   };
 
-  if (!learner || !plan) return <EmptyState text="请先创建学员和学习计划。" />;
+  const complete = async () => {
+    setReading(false);
+    setPercent(95);
+    await recordProgress(95);
+  };
+
+  if (!learning || !plan) return <EmptyState text="暂无学习计划，请联系管理员分配计划。" />;
 
   return (
     <section className="page-grid">
-      <Panel title={`${learner.name} 的学习任务`} className="wide-panel">
+      <Panel title={`${user.name} 的阶段学习`} className="wide-panel">
+        <div className="learner-summary">
+          <Progress value={percent} />
+          <span>当前阶段 {progress?.stage || user.stage || 'L1'} · 当前难度 {progress?.difficulty || user.difficulty || 'L1'}</span>
+        </div>
         <div className="learning-cards">
           {approved.map((kp) => (
             <article className="learning-card" key={kp.id}>
@@ -424,13 +537,17 @@ function LearningDesk({ data, onRefresh }) {
             </article>
           ))}
         </div>
-        <button className="primary" onClick={complete}>
-          <CheckCircle2 size={16} />
-          模拟完成阶段学习并触发考试
-        </button>
+        <div className="action-row">
+          <button onClick={() => setReading(true)}>开始学习</button>
+          <button className="primary" onClick={complete}>
+            <CheckCircle2 size={16} />
+            完成阶段学习并触发考试
+          </button>
+        </div>
+        {reading && <div className="result">学习计时中：系统会记录阅读进度、有效学习时长和当前位置。</div>}
       </Panel>
 
-      <Panel title="完成规则">
+      <Panel title="学习完成规则">
         <div className="rule-list">
           <p>阅读进度达到 90% 以上。</p>
           <p>记录有效学习时长和当前阅读位置。</p>
@@ -441,18 +558,19 @@ function LearningDesk({ data, onRefresh }) {
   );
 }
 
-function ExamDesk({ data, onRefresh }) {
-  const exam = data.exams[0];
+function ExamDesk({ data, user, onRefresh }) {
+  const pendingFirst = useMemo(() => [...(data.myExams || [])].sort((a, b) => Number(a.status !== 'pending') - Number(b.status !== 'pending'))[0], [data.myExams]);
+  const exam = pendingFirst;
   const [answers, setAnswers] = useState({});
   const [startedAt, setStartedAt] = useState(Date.now());
   const [result, setResult] = useState(null);
 
   useEffect(() => {
-    if (!exam) return;
+    if (!exam || exam.status !== 'pending') return;
     const record = (type, message) =>
       api(`/api/exams/${exam.id}/violation`, {
         method: 'POST',
-        body: JSON.stringify({ type, message, severity: type === 'hidden' ? 'critical' : 'warning' })
+        body: JSON.stringify({ userId: user.id, type, message, severity: type === 'hidden' ? 'critical' : 'warning' })
       }).then(onRefresh);
     const onHidden = () => document.hidden && record('hidden', '考试页进入后台或切换标签');
     const onBlur = () => record('blur', '窗口失焦');
@@ -474,7 +592,7 @@ function ExamDesk({ data, onRefresh }) {
       document.removeEventListener('copy', onCopy);
       document.removeEventListener('contextmenu', onContext);
     };
-  }, [exam?.id]);
+  }, [exam?.id, exam?.status]);
 
   const submit = async () => {
     const payload = {
@@ -491,48 +609,53 @@ function ExamDesk({ data, onRefresh }) {
 
   return (
     <section className="page-grid">
-      <Panel title={`${exam.user?.name || '学员'} · ${exam.stage} 阶段考试`} className="wide-panel">
+      <Panel title={`${user.name} · ${exam.stage} 阶段考试`} className="wide-panel">
         <div className="exam-meta">
           <span>时长 {exam.durationMinutes} 分钟</span>
           <span>及格 {exam.passScore} 分</span>
           <span>状态 {statusText(exam.status)}</span>
         </div>
-        <div className="question-list">
-          {exam.questions.map((question) => (
-            <article className="question" key={question.id}>
-              <h3>{question.title}</h3>
-              {question.options.map((option) => (
-                <label key={option}>
-                  <input
-                    type={question.type === 'multi' ? 'checkbox' : 'radio'}
-                    name={question.id}
-                    checked={(answers[question.id] || []).includes(option)}
-                    onChange={(event) => {
-                      const next = question.type === 'multi'
-                        ? event.target.checked
-                          ? [...(answers[question.id] || []), option]
-                          : (answers[question.id] || []).filter((item) => item !== option)
-                        : [option];
-                      setAnswers({ ...answers, [question.id]: next });
-                    }}
-                  />
-                  {option}
-                </label>
+        {exam.status === 'pending' ? (
+          <>
+            <div className="question-list">
+              {exam.questions.map((question) => (
+                <article className="question" key={question.id}>
+                  <h3>{question.title}</h3>
+                  {question.options.map((option) => (
+                    <label key={option}>
+                      <input
+                        type={question.type === 'multi' ? 'checkbox' : 'radio'}
+                        name={question.id}
+                        checked={(answers[question.id] || []).includes(option)}
+                        onChange={(event) => {
+                          const next =
+                            question.type === 'multi'
+                              ? event.target.checked
+                                ? [...(answers[question.id] || []), option]
+                                : (answers[question.id] || []).filter((item) => item !== option)
+                              : [option];
+                          setAnswers({ ...answers, [question.id]: next });
+                        }}
+                      />
+                      {option}
+                    </label>
+                  ))}
+                </article>
               ))}
-            </article>
-          ))}
-        </div>
-        <button className="primary" onClick={submit}>
-          提交考试
-        </button>
+            </div>
+            <button className="primary" onClick={submit}>提交考试</button>
+          </>
+        ) : (
+          <div className="result">本场考试已提交，得分 {exam.score || result?.score || 0}，结果 {statusText(exam.status)}。</div>
+        )}
         {result && <div className="result">本次得分 {result.score}，结果 {statusText(result.status)}</div>}
       </Panel>
 
       <Panel title="防离开规则">
         <div className="rule-list danger">
-          <p>离开考试界面 1 次: 警告。</p>
-          <p>离开考试界面 2 次: 记录违规。</p>
-          <p>离开考试界面 3 次: 可自动交卷。</p>
+          <p>离开考试界面 1 次：警告。</p>
+          <p>离开考试界面 2 次：记录违规。</p>
+          <p>离开考试界面 3 次：可自动交卷。</p>
           <p>复制、右键、窗口失焦都会记录。</p>
         </div>
       </Panel>
@@ -600,8 +723,8 @@ function DataTable({ columns, rows }) {
 function Progress({ value }) {
   return (
     <div className="progress">
-      <span style={{ width: `${value}%` }} />
-      <strong>{value}%</strong>
+      <span style={{ width: `${Math.min(100, value)}%` }} />
+      <strong>{Math.min(100, value)}%</strong>
     </div>
   );
 }
@@ -612,7 +735,7 @@ function ReviewItem({ item, title, meta, onApprove }) {
       <div>
         <h3>{title || item.title}</h3>
         <p>{item.summary || item.analysis}</p>
-        <small>{meta || `${item.stage} · ${item.difficulty} · 置信度 ${Math.round(item.confidence * 100)}%`}</small>
+        <small>{meta || `${item.stage} · ${item.difficulty} · 置信度 ${Math.round(item.confidence * 100)}% · ${item.generatedBy || 'AI'}`}</small>
       </div>
       <button disabled={item.status === 'approved'} onClick={onApprove}>
         {item.status === 'approved' ? '已通过' : '通过'}
@@ -636,8 +759,17 @@ function fieldLabel(key) {
     account: '登录账号',
     department: '部门',
     position: '岗位',
-    feishuUserId: '飞书 User ID'
+    feishuUserId: '飞书 User ID',
+    initialPassword: '初始密码'
   }[key];
+}
+
+function roleText(role) {
+  return {
+    super_admin: '超级管理员',
+    admin: '管理员',
+    learner: '学员'
+  }[role] || role;
 }
 
 function statusText(status) {

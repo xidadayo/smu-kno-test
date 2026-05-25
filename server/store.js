@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -10,6 +11,13 @@ export const uploadDir = path.resolve(rootDir, process.env.UPLOAD_DIR || './uplo
 
 const now = () => new Date().toISOString();
 const id = (prefix) => `${prefix}_${Math.random().toString(36).slice(2, 8)}${Date.now().toString(36)}`;
+const hashPassword = (password) => crypto.createHash('sha256').update(String(password)).digest('hex');
+
+function sanitizeUser(user) {
+  if (!user) return null;
+  const { passwordHash, ...safe } = user;
+  return safe;
+}
 
 const seed = () => ({
   users: [
@@ -22,6 +30,8 @@ const seed = () => ({
       position: '管理员',
       feishuUserId: 'ou_admin',
       status: 'active',
+      passwordHash: hashPassword('admin123'),
+      initialPassword: 'admin123',
       createdAt: now()
     },
     {
@@ -35,6 +45,8 @@ const seed = () => ({
       status: 'active',
       stage: 'L2',
       difficulty: 'L2',
+      passwordHash: hashPassword('123456'),
+      initialPassword: '123456',
       createdAt: now()
     },
     {
@@ -48,6 +60,8 @@ const seed = () => ({
       status: 'active',
       stage: 'L1',
       difficulty: 'L1',
+      passwordHash: hashPassword('123456'),
+      initialPassword: '123456',
       createdAt: now()
     }
   ],
@@ -199,7 +213,18 @@ export function ensureStore() {
 
 export function readStore() {
   ensureStore();
-  return JSON.parse(fs.readFileSync(dataFile, 'utf8'));
+  const store = JSON.parse(fs.readFileSync(dataFile, 'utf8'));
+  let changed = false;
+  for (const user of store.users || []) {
+    if (!user.passwordHash) {
+      const fallback = user.role === 'learner' ? '123456' : 'admin123';
+      user.passwordHash = hashPassword(user.initialPassword || fallback);
+      user.initialPassword = user.initialPassword || fallback;
+      changed = true;
+    }
+  }
+  if (changed) writeStore(store);
+  return store;
 }
 
 export function writeStore(store) {
@@ -223,4 +248,4 @@ export function logAudit(store, action, actorId, detail = {}) {
   });
 }
 
-export { id, now };
+export { hashPassword, id, now, sanitizeUser };

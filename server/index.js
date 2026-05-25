@@ -1,10 +1,11 @@
+import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
 import multer from 'multer';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { ensureStore, id, logAudit, mutateStore, now, readStore, uploadDir } from './store.js';
-import { mockGenerateFromFile } from './ai.js';
+import { ensureStore, hashPassword, logAudit, mutateStore, now, readStore, sanitizeUser, uploadDir } from './store.js';
+import { generateFromFile } from './ai.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const rootDir = path.resolve(__dirname, '..');
@@ -23,6 +24,11 @@ if (process.env.NODE_ENV === 'production') {
 }
 
 const actor = (req) => req.header('x-user-id') || 'u_admin';
+const sanitizeLearner = (user) => sanitizeUser(user);
+
+function userFromRequest(req, store) {
+  return store.users.find((user) => user.id === actor(req));
+}
 
 function learnerRows(store) {
   return store.users
@@ -33,7 +39,7 @@ function learnerRows(store) {
       const latestExam = exams.at(-1);
       const violations = store.violations.filter((item) => item.userId === user.id);
       return {
-        ...user,
+        ...sanitizeLearner(user),
         progressPercent: progress?.percent || 0,
         learningStatus: progress?.status || 'not_started',
         currentStage: progress?.stage || user.stage || 'L1',
@@ -81,6 +87,26 @@ app.get('/api/health', (_req, res) => {
   res.json({ status: 'ok', time: now() });
 });
 
+app.post('/api/auth/login', (req, res) => {
+  const { account, password } = req.body || {};
+  const store = readStore();
+  const user = store.users.find((item) => item.account === account && item.status === 'active');
+  if (!user || user.passwordHash !== hashPassword(password)) {
+    return res.status(401).json({ error: '账号或密码错误' });
+  }
+  res.json({
+    user: sanitizeUser(user),
+    token: Buffer.from(`${user.id}:${Date.now()}`).toString('base64')
+  });
+});
+
+app.get('/api/me', (req, res) => {
+  const store = readStore();
+  const user = userFromRequest(req, store);
+  if (!user) return res.status(404).json({ error: 'user not found' });
+  res.json(sanitizeUser(user));
+});
+
 app.get('/api/summary', (_req, res) => {
   res.json(summary(readStore()));
 });
@@ -97,9 +123,12 @@ app.post('/api/learners', (req, res) => {
       status: 'active',
       stage: 'L1',
       difficulty: 'L1',
+      initialPassword: req.body.initialPassword || '123456',
+      passwordHash: hashPassword(req.body.initialPassword || '123456'),
       createdAt: helpers.now(),
       ...req.body
     };
+    delete user.password;
     store.users.push(user);
     store.progress.push({
       id: helpers.id('pg'),
@@ -114,7 +143,7 @@ app.post('/api/learners', (req, res) => {
       updatedAt: helpers.now()
     });
     logAudit(store, 'learner.create', actor(req), { userId: user.id });
-    return user;
+    return sanitizeUser(user);
   });
   res.status(201).json(created);
 });
@@ -137,6 +166,8 @@ app.post('/api/learners/import', (req, res) => {
       status: 'active',
       stage: 'L1',
       difficulty: 'L1',
+      initialPassword: '123456',
+      passwordHash: hashPassword('123456'),
       createdAt: helpers.now()
     }));
     store.users.push(...users);
@@ -155,7 +186,7 @@ app.post('/api/learners/import', (req, res) => {
       });
     });
     logAudit(store, 'learner.import', actor(req), { count: users.length });
-    return users;
+    return users.map(sanitizeUser);
   });
   res.status(201).json({ imported: imported.length, users: imported });
 });
@@ -169,21 +200,25 @@ app.get('/api/knowledge', (_req, res) => {
   });
 });
 
-app.post('/api/documents/upload', upload.single('file'), (req, res) => {
+app.post('/api/documents/upload', upload.single('file'), async (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'file is required' });
 
+  const documentId = idForDocument();
+  const generated = await generateFromFile(req.file, documentId);
   const result = mutateStore((store, helpers) => {
     const document = {
-      id: helpers.id('doc'),
+      id: documentId,
       title: req.body.title || req.file.originalname,
       type: path.extname(req.file.originalname).replace('.', '') || 'file',
-      status: 'processed',
+      status: generated.aiError ? 'processed_with_fallback' : 'processed',
       filePath: req.file.path,
       originalName: req.file.originalname,
       uploadedBy: actor(req),
+      aiProvider: generated.provider,
+      aiModel: generated.model,
+      aiError: generated.aiError,
       createdAt: helpers.now()
     };
-    const generated = mockGenerateFromFile(req.file, document.id);
     store.documents.unshift(document);
     store.knowledgePoints.unshift(...generated.knowledgePoints);
     store.questions.unshift(...generated.questions);
@@ -197,6 +232,10 @@ app.post('/api/documents/upload', upload.single('file'), (req, res) => {
 
   res.status(201).json(result);
 });
+
+function idForDocument() {
+  return `doc_${Math.random().toString(36).slice(2, 8)}${Date.now().toString(36)}`;
+}
 
 app.patch('/api/knowledge/:id/review', (req, res) => {
   const updated = mutateStore((store) => {
@@ -312,9 +351,40 @@ app.get('/api/exams', (_req, res) => {
   res.json(
     store.examTasks.map((exam) => ({
       ...exam,
-      user: store.users.find((user) => user.id === exam.userId),
+      user: sanitizeUser(store.users.find((user) => user.id === exam.userId)),
       questions: exam.questionIds.map((qid) => store.questions.find((question) => question.id === qid)).filter(Boolean)
     }))
+  );
+});
+
+app.get('/api/my/learning', (req, res) => {
+  const store = readStore();
+  const user = userFromRequest(req, store);
+  if (!user) return res.status(404).json({ error: 'user not found' });
+  const progress = store.progress.filter((item) => item.userId === user.id);
+  const planIds = new Set(progress.map((item) => item.planId));
+  const plans = store.learningPlans.filter((item) => planIds.has(item.id) || item.status === 'active');
+  const currentStage = progress[0]?.stage || user.stage || 'L1';
+  res.json({
+    user: sanitizeUser(user),
+    progress,
+    plans,
+    knowledgePoints: store.knowledgePoints.filter((item) => item.status === 'approved' && item.stage === currentStage)
+  });
+});
+
+app.get('/api/my/exams', (req, res) => {
+  const store = readStore();
+  const user = userFromRequest(req, store);
+  if (!user) return res.status(404).json({ error: 'user not found' });
+  res.json(
+    store.examTasks
+      .filter((exam) => exam.userId === user.id)
+      .map((exam) => ({
+        ...exam,
+        user: sanitizeUser(user),
+        questions: exam.questionIds.map((qid) => store.questions.find((question) => question.id === qid)).filter(Boolean)
+      }))
   );
 });
 
@@ -374,7 +444,7 @@ app.get('/api/violations', (_req, res) => {
   res.json(
     store.violations.map((item) => ({
       ...item,
-      user: store.users.find((user) => user.id === item.userId),
+      user: sanitizeUser(store.users.find((user) => user.id === item.userId)),
       exam: store.examTasks.find((exam) => exam.id === item.examId)
     }))
   );
