@@ -32,6 +32,7 @@ const collectionMap = {
   questions: 'questions',
   learningPlans: 'learningPlans',
   progress: 'progress',
+  learningRecords: 'learningRecords',
   examTasks: 'examTasks',
   examAttempts: 'examAttempts',
   violations: 'violations',
@@ -98,6 +99,49 @@ function summary(store) {
 
 function visibleForDepartment(item, department) {
   return !item.department || item.department === '全公司' || item.department === department;
+}
+
+function availableKnowledgeFor(store, user, stage) {
+  return store.knowledgePoints.filter(
+    (item) => item.status === 'approved' && item.stage === stage && visibleForDepartment(item, user.department)
+  );
+}
+
+function ensureExamForProgress(store, helpers, progress) {
+  const existingExam = store.examTasks.find((item) => item.userId === progress.userId && item.stage === progress.stage);
+  if (existingExam) return existingExam;
+
+  const learner = store.users.find((user) => user.id === progress.userId);
+  const plan = store.learningPlans.find((item) => item.id === progress.planId);
+  const questionCount = Math.max(1, Number(plan?.questionCount || 5));
+  const questions = store.questions
+    .filter((question) => question.status === 'approved' && question.stage === progress.stage && visibleForDepartment(question, learner?.department))
+    .map((question) => question.id)
+    .slice(0, questionCount);
+  const exam = {
+    id: helpers.id('exam'),
+    userId: progress.userId,
+    planId: progress.planId,
+    stage: progress.stage,
+    difficulty: progress.difficulty,
+    status: 'pending',
+    passScore: Number(plan?.passScore || 60),
+    durationMinutes: Number(plan?.durationMinutes || 30),
+    questionCount,
+    questionIds: questions,
+    createdAt: helpers.now()
+  };
+  store.examTasks.unshift(exam);
+  store.pushRecords.unshift({
+    id: helpers.id('push'),
+    userId: progress.userId,
+    channel: 'feishu',
+    title: '学习完成，阶段考试已生成',
+    content: `${progress.stage} 阶段考试已生成，请进入浏览器考试。`,
+    status: process.env.FEISHU_WEBHOOK_URL ? 'ready_to_send' : 'mock_sent',
+    createdAt: helpers.now()
+  });
+  return exam;
 }
 
 app.get('/api/health', (_req, res) => {
@@ -334,36 +378,7 @@ app.post('/api/progress', (req, res) => {
     progress.updatedAt = helpers.now();
 
     if (progress.status === 'completed') {
-      const existingExam = store.examTasks.find((item) => item.userId === progress.userId && item.stage === progress.stage);
-      if (!existingExam) {
-        const learner = store.users.find((user) => user.id === progress.userId);
-        const questions = store.questions
-          .filter((question) => question.status === 'approved' && question.stage === progress.stage && visibleForDepartment(question, learner?.department))
-          .map((question) => question.id)
-          .slice(0, 5);
-        const exam = {
-          id: helpers.id('exam'),
-          userId: progress.userId,
-          planId: progress.planId,
-          stage: progress.stage,
-          difficulty: progress.difficulty,
-          status: 'pending',
-          passScore: 60,
-          durationMinutes: 30,
-          questionIds: questions,
-          createdAt: helpers.now()
-        };
-        store.examTasks.unshift(exam);
-        store.pushRecords.unshift({
-          id: helpers.id('push'),
-          userId: progress.userId,
-          channel: 'feishu',
-          title: '学习完成，阶段考试已生成',
-          content: `${progress.stage} 阶段考试已生成，请进入浏览器考试。`,
-          status: process.env.FEISHU_WEBHOOK_URL ? 'ready_to_send' : 'mock_sent',
-          createdAt: helpers.now()
-        });
-      }
+      ensureExamForProgress(store, helpers, progress);
     }
 
     logAudit(store, 'progress.update', actor(req), { progressId: progress.id, percent: progress.percent });
@@ -391,12 +406,83 @@ app.get('/api/my/learning', (req, res) => {
   const planIds = new Set(progress.map((item) => item.planId));
   const plans = store.learningPlans.filter((item) => planIds.has(item.id) || item.status === 'active');
   const currentStage = progress[0]?.stage || user.stage || 'L1';
+  const knowledgePoints = availableKnowledgeFor(store, user, currentStage);
   res.json({
     user: sanitizeUser(user),
     progress,
     plans,
-    knowledgePoints: store.knowledgePoints.filter((item) => item.status === 'approved' && item.stage === currentStage && visibleForDepartment(item, user.department))
+    learningRecords: store.learningRecords.filter((item) => item.userId === user.id),
+    knowledgePoints
   });
+});
+
+app.post('/api/my/knowledge/:id/complete', (req, res) => {
+  const result = mutateStore((store, helpers) => {
+    const user = userFromRequest(req, store);
+    if (!user) return null;
+    const kp = store.knowledgePoints.find((item) => item.id === req.params.id && item.status === 'approved');
+    if (!kp || !visibleForDepartment(kp, user.department)) return null;
+
+    const planId = req.body.planId || store.learningPlans.find((plan) => plan.status === 'active')?.id || null;
+    let record = store.learningRecords.find((item) => item.userId === user.id && item.knowledgePointId === kp.id);
+    if (!record) {
+      record = {
+        id: helpers.id('lr'),
+        userId: user.id,
+        planId,
+        knowledgePointId: kp.id,
+        stage: kp.stage,
+        difficulty: kp.difficulty,
+        status: 'completed',
+        effectiveSeconds: Number(req.body.effectiveSeconds || 180),
+        startedAt: req.body.startedAt || helpers.now(),
+        completedAt: helpers.now()
+      };
+      store.learningRecords.unshift(record);
+    } else {
+      record.status = 'completed';
+      record.effectiveSeconds += Number(req.body.effectiveSeconds || 180);
+      record.completedAt = helpers.now();
+    }
+
+    let progress = store.progress.find((item) => item.userId === user.id && item.planId === planId && item.stage === kp.stage);
+    if (!progress) {
+      progress = {
+        id: helpers.id('pg'),
+        userId: user.id,
+        planId,
+        stage: kp.stage,
+        difficulty: kp.difficulty,
+        status: 'learning',
+        percent: 0,
+        effectiveSeconds: 0,
+        lastPosition: null
+      };
+      store.progress.push(progress);
+    }
+
+    const available = availableKnowledgeFor(store, user, kp.stage);
+    const completedIds = new Set(
+      store.learningRecords
+        .filter((item) => item.userId === user.id && item.stage === kp.stage && item.status === 'completed')
+        .map((item) => item.knowledgePointId)
+    );
+    progress.percent = available.length === 0 ? 0 : Math.round((completedIds.size / available.length) * 100);
+    progress.effectiveSeconds += Number(req.body.effectiveSeconds || 180);
+    progress.lastPosition = kp.id;
+    progress.status = progress.percent >= 100 ? 'completed' : 'learning';
+    progress.updatedAt = helpers.now();
+
+    let exam = null;
+    if (progress.status === 'completed') {
+      exam = ensureExamForProgress(store, helpers, progress);
+    }
+
+    logAudit(store, 'learning.knowledge.complete', actor(req), { knowledgePointId: kp.id, progressId: progress.id });
+    return { record, progress, exam };
+  });
+  if (!result) return res.status(404).json({ error: 'knowledge point not found or not visible' });
+  res.json(result);
 });
 
 app.get('/api/my/exams', (req, res) => {
@@ -436,6 +522,12 @@ app.post('/api/exams/:id/submit', (req, res) => {
       score,
       status: exam.status,
       durationSeconds: Number(req.body.durationSeconds || 0),
+      questionCount: questions.length,
+      correctCount: questions.reduce((sum, question) => {
+        const given = Array.isArray(answers[question.id]) ? answers[question.id] : [answers[question.id]].filter(Boolean);
+        const correct = question.answer.every((item) => given.includes(item)) && given.length === question.answer.length;
+        return sum + (correct ? 1 : 0);
+      }, 0),
       createdAt: helpers.now()
     };
     store.examAttempts.unshift(attempt);
@@ -534,6 +626,7 @@ app.delete('/api/admin/:collection/:id', (req, res) => {
 
     if (storeKey === 'users') {
       store.progress = store.progress.filter((entry) => entry.userId !== item.id);
+      store.learningRecords = store.learningRecords.filter((entry) => entry.userId !== item.id);
       store.examTasks = store.examTasks.filter((entry) => entry.userId !== item.id);
       store.examAttempts = store.examAttempts.filter((entry) => entry.userId !== item.id);
       store.violations = store.violations.filter((entry) => entry.userId !== item.id);
@@ -544,6 +637,7 @@ app.delete('/api/admin/:collection/:id', (req, res) => {
       const kpIds = new Set(store.knowledgePoints.filter((entry) => entry.documentId === item.id).map((entry) => entry.id));
       const questionIds = new Set(store.questions.filter((entry) => kpIds.has(entry.knowledgePointId)).map((entry) => entry.id));
       store.knowledgePoints = store.knowledgePoints.filter((entry) => entry.documentId !== item.id);
+      store.learningRecords = store.learningRecords.filter((entry) => !kpIds.has(entry.knowledgePointId));
       store.questions = store.questions.filter((entry) => !kpIds.has(entry.knowledgePointId));
       store.examTasks.forEach((exam) => {
         exam.questionIds = (exam.questionIds || []).filter((questionId) => !questionIds.has(questionId));
@@ -553,6 +647,7 @@ app.delete('/api/admin/:collection/:id', (req, res) => {
     if (storeKey === 'knowledgePoints') {
       const questionIds = new Set(store.questions.filter((entry) => entry.knowledgePointId === item.id).map((entry) => entry.id));
       store.questions = store.questions.filter((entry) => entry.knowledgePointId !== item.id);
+      store.learningRecords = store.learningRecords.filter((entry) => entry.knowledgePointId !== item.id);
       store.examTasks.forEach((exam) => {
         exam.questionIds = (exam.questionIds || []).filter((questionId) => !questionIds.has(questionId));
       });

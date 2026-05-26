@@ -443,6 +443,9 @@ function Plans({ data, onRefresh }) {
     pushMode: 'progressive',
     pushCycle: 'daily',
     completionRule: 90,
+    questionCount: 5,
+    passScore: 60,
+    durationMinutes: 30,
     autoExam: true
   });
 
@@ -476,18 +479,32 @@ function Plans({ data, onRefresh }) {
             <span>完成条件</span>
             <input type="number" value={form.completionRule} onChange={(event) => setForm({ ...form, completionRule: Number(event.target.value) })} />
           </label>
+          <label>
+            <span>考试题目数量</span>
+            <input type="number" min="1" value={form.questionCount} onChange={(event) => setForm({ ...form, questionCount: Number(event.target.value) })} />
+          </label>
+          <label>
+            <span>及格分</span>
+            <input type="number" min="1" value={form.passScore} onChange={(event) => setForm({ ...form, passScore: Number(event.target.value) })} />
+          </label>
+          <label>
+            <span>考试时长</span>
+            <input type="number" min="1" value={form.durationMinutes} onChange={(event) => setForm({ ...form, durationMinutes: Number(event.target.value) })} />
+          </label>
           <button className="primary">保存计划</button>
         </form>
       </Panel>
 
       <Panel title="计划列表" className="wide-panel">
         <DataTable
-          columns={['计划', '对象', '阶段', '模式', '自动考试', '状态']}
+          columns={['计划', '对象', '阶段', '模式', '题数', '及格分', '自动考试', '状态']}
           rows={data.plans.map((plan) => [
             plan.name,
             plan.targetDepartment,
             (plan.stages || []).join(' / '),
             plan.pushMode,
+            plan.questionCount || 5,
+            plan.passScore || 60,
             plan.autoExam ? '开启' : '关闭',
             plan.status
           ])}
@@ -502,70 +519,78 @@ function LearningDesk({ data, user, onRefresh }) {
   const plan = learning?.plans?.[0];
   const progress = learning?.progress?.[0];
   const approved = learning?.knowledgePoints || [];
+  const records = learning?.learningRecords || [];
+  const completedIds = useMemo(() => new Set(records.filter((item) => item.status === 'completed').map((item) => item.knowledgePointId)), [records]);
+  const firstUnlearnedIndex = Math.max(0, approved.findIndex((item) => !completedIds.has(item.id)));
+  const [page, setPage] = useState(0);
   const [reading, setReading] = useState(false);
-  const [percent, setPercent] = useState(progress?.percent || 0);
+  const [startedAt, setStartedAt] = useState(Date.now());
+  const percent = approved.length === 0 ? 0 : Math.round((completedIds.size / approved.length) * 100);
+  const currentIndex = Math.min(page, Math.max(approved.length - 1, 0));
+  const current = approved[currentIndex];
+  const isCompleted = current ? completedIds.has(current.id) : false;
 
   useEffect(() => {
-    setPercent(progress?.percent || 0);
-  }, [progress?.percent]);
-
-  const recordProgress = async (nextPercent) => {
-    if (!plan) return;
-    await api('/api/progress', {
-      method: 'POST',
-      body: JSON.stringify({
-        userId: user.id,
-        planId: plan.id,
-        stage: progress?.stage || user.stage || 'L1',
-        difficulty: progress?.difficulty || user.difficulty || 'L1',
-        percent: nextPercent,
-        effectiveSeconds: 180,
-        lastPosition: approved[0]?.id
-      })
-    });
-    onRefresh();
-  };
+    if (firstUnlearnedIndex >= 0) setPage(firstUnlearnedIndex);
+  }, [firstUnlearnedIndex, approved.length]);
 
   const complete = async () => {
+    if (!current) return;
     setReading(false);
-    setPercent(95);
-    await recordProgress(95);
+    const effectiveSeconds = Math.max(30, Math.round((Date.now() - startedAt) / 1000));
+    await api(`/api/my/knowledge/${current.id}/complete`, {
+      method: 'POST',
+      body: JSON.stringify({
+        planId: plan?.id,
+        effectiveSeconds,
+        startedAt: new Date(startedAt).toISOString()
+      })
+    });
+    await onRefresh();
+    setStartedAt(Date.now());
+    setPage((value) => Math.min(value + 1, Math.max(approved.length - 1, 0)));
   };
 
   if (!learning || !plan) return <EmptyState text="暂无学习计划，请联系管理员分配计划。" />;
+  if (approved.length === 0) return <EmptyState text="当前阶段暂无可学习知识点，请联系管理员审核并发布知识库。" />;
 
   return (
     <section className="page-grid">
       <Panel title={`${user.name} 的阶段学习`} className="wide-panel">
         <div className="learner-summary">
           <Progress value={percent} />
-          <span>当前阶段 {progress?.stage || user.stage || 'L1'} · 当前难度 {progress?.difficulty || user.difficulty || 'L1'}</span>
+          <span>第 {currentIndex + 1} / {approved.length} 个知识点 · 已完成 {completedIds.size} 个 · 当前阶段 {progress?.stage || user.stage || 'L1'}</span>
         </div>
-        <div className="learning-cards">
-          {approved.map((kp) => (
-            <article className="learning-card" key={kp.id}>
-              <span>{kp.stage}</span>
-              <h3>{kp.title}</h3>
-              <p>{kp.summary}</p>
-              <small>来源: {kp.sourceLocation} · 预计 {kp.estimatedMinutes} 分钟</small>
-            </article>
+        <article className="learning-card single-learning-card">
+          <span>{current.stage}</span>
+          <h3>{current.title}</h3>
+          <p>{current.summary}</p>
+          <small>来源: {current.sourceLocation} · 预计 {current.estimatedMinutes} 分钟 · {isCompleted ? '已学习' : '未学习'}</small>
+        </article>
+        <div className="pager">
+          {approved.map((kp, index) => (
+            <button className={index === currentIndex ? 'active' : ''} key={kp.id} onClick={() => setPage(index)}>
+              {index + 1}
+              {completedIds.has(kp.id) ? ' ✓' : ''}
+            </button>
           ))}
         </div>
         <div className="action-row">
-          <button onClick={() => setReading(true)}>开始学习</button>
-          <button className="primary" onClick={complete}>
+          <button onClick={() => { setReading(true); setStartedAt(Date.now()); }}>开始学习</button>
+          <button disabled={isCompleted} className="primary" onClick={complete}>
             <CheckCircle2 size={16} />
-            完成阶段学习并触发考试
+            {isCompleted ? '本知识点已完成' : '完成本知识点，学习下一个'}
           </button>
         </div>
         {reading && <div className="result">学习计时中：系统会记录阅读进度、有效学习时长和当前位置。</div>}
+        {percent >= 100 && <div className="result">本阶段知识点已全部学习完成，系统已生成或保留阶段考试任务。</div>}
       </Panel>
 
       <Panel title="学习完成规则">
         <div className="rule-list">
-          <p>阅读进度达到 90% 以上。</p>
-          <p>记录有效学习时长和当前阅读位置。</p>
-          <p>阶段知识点完成后自动生成考试任务。</p>
+          <p>一次只学习一个知识点，完成后进入下一个。</p>
+          <p>每个知识点都会保存个人学习记录和有效学习时长。</p>
+          <p>当前阶段全部知识点完成后自动生成考试任务。</p>
         </div>
       </Panel>
     </section>
@@ -678,12 +703,32 @@ function ExamDesk({ data, user, onRefresh }) {
 }
 
 function Monitor({ data }) {
+  const attempts = data.adminCollections?.examAttempts || [];
   return (
     <section className="page-grid">
       <Panel title="违规记录" className="wide-panel">
         <DataTable
           columns={['学员', '类型', '说明', '级别', '时间']}
           rows={data.violations.map((item) => [item.user?.name || item.userId, item.type, item.message, item.severity, formatTime(item.createdAt)])}
+        />
+      </Panel>
+
+      <Panel title="考试结果" className="wide-panel">
+        <DataTable
+          columns={['学员', '考试', '题数', '正确', '得分', '结果', '用时', '提交时间']}
+          rows={attempts.map((attempt) => {
+            const exam = data.exams.find((item) => item.id === attempt.examId);
+            return [
+              exam?.user?.name || attempt.userId,
+              exam ? `${exam.stage} 阶段考试` : attempt.examId,
+              attempt.questionCount || exam?.questionIds?.length || 0,
+              attempt.correctCount ?? '-',
+              attempt.score,
+              statusText(attempt.status),
+              `${attempt.durationSeconds || 0} 秒`,
+              formatTime(attempt.createdAt)
+            ];
+          })}
         />
       </Panel>
 
@@ -704,6 +749,7 @@ const collectionLabels = {
   questions: '题库',
   learningPlans: '学习计划',
   progress: '学习进度',
+  learningRecords: '学习记录',
   examTasks: '考试任务',
   examAttempts: '考试提交',
   violations: '违规记录',

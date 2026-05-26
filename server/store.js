@@ -104,6 +104,20 @@ const seed = () => ({
       estimatedMinutes: 22,
       confidence: 0.84,
       status: 'pending_review'
+    },
+    {
+      id: 'kp_003',
+      documentId: 'doc_seed',
+      title: '抽检比例基础',
+      department: '全公司',
+      summary: '学习如何理解抽检比例、样本数量和基础质检判定关系。',
+      keywords: ['抽检', '样本', '比例'],
+      stage: 'L1',
+      difficulty: 'L1',
+      sourceLocation: '第 2 章',
+      estimatedMinutes: 10,
+      confidence: 0.9,
+      status: 'approved'
     }
   ],
   questions: [
@@ -136,6 +150,21 @@ const seed = () => ({
       score: 10,
       confidence: 0.78,
       status: 'pending_review'
+    },
+    {
+      id: 'q_003',
+      knowledgePointId: 'kp_003',
+      type: 'single',
+      department: '全公司',
+      title: '抽检比例主要影响什么？',
+      options: ['样本数量', '员工姓名', '登录方式', '菜单颜色'],
+      answer: ['样本数量'],
+      analysis: '抽检比例会影响样本数量，并进一步影响质检覆盖范围。',
+      stage: 'L1',
+      difficulty: 'L1',
+      score: 10,
+      confidence: 0.9,
+      status: 'approved'
     }
   ],
   learningPlans: [
@@ -148,6 +177,9 @@ const seed = () => ({
       pushCycle: 'daily',
       autoExam: true,
       completionRule: 90,
+      questionCount: 5,
+      passScore: 60,
+      durationMinutes: 30,
       status: 'active',
       createdAt: now()
     }
@@ -159,8 +191,8 @@ const seed = () => ({
       planId: 'plan_001',
       stage: 'L1',
       difficulty: 'L1',
-      status: 'completed',
-      percent: 100,
+      status: 'learning',
+      percent: 50,
       effectiveSeconds: 1860,
       lastPosition: 'kp_001',
       updatedAt: now()
@@ -178,33 +210,24 @@ const seed = () => ({
       updatedAt: now()
     }
   ],
-  examTasks: [
+  learningRecords: [
     {
-      id: 'exam_001',
+      id: 'lr_001',
       userId: 'u_001',
       planId: 'plan_001',
+      knowledgePointId: 'kp_001',
       stage: 'L1',
       difficulty: 'L1',
-      status: 'pending',
-      passScore: 60,
-      durationMinutes: 30,
-      questionIds: ['q_001'],
-      createdAt: now()
+      status: 'completed',
+      effectiveSeconds: 1860,
+      startedAt: now(),
+      completedAt: now()
     }
   ],
+  examTasks: [],
   examAttempts: [],
   violations: [],
-  pushRecords: [
-    {
-      id: 'push_001',
-      userId: 'u_001',
-      channel: 'feishu',
-      title: '阶段考试提醒',
-      content: 'L1 阶段已完成，请进入浏览器考试。',
-      status: 'mock_sent',
-      createdAt: now()
-    }
-  ],
+  pushRecords: [],
   auditLogs: []
 });
 
@@ -219,7 +242,22 @@ export function ensureStore() {
 export function readStore() {
   ensureStore();
   const store = JSON.parse(fs.readFileSync(dataFile, 'utf8'));
+  store.learningRecords = store.learningRecords || [];
   let changed = false;
+  for (const plan of store.learningPlans || []) {
+    if (!plan.questionCount) {
+      plan.questionCount = 5;
+      changed = true;
+    }
+    if (!plan.passScore) {
+      plan.passScore = 60;
+      changed = true;
+    }
+    if (!plan.durationMinutes) {
+      plan.durationMinutes = 30;
+      changed = true;
+    }
+  }
   for (const user of store.users || []) {
     if (!user.passwordHash) {
       const fallback = user.role === 'learner' ? '123456' : 'admin123';

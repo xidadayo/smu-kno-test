@@ -516,6 +516,11 @@ textarea {
   background: #fbfdfe;
 }
 
+.single-learning-card {
+  max-width: 720px;
+  margin-bottom: 14px;
+}
+
 .learning-card > span {
   display: inline-grid;
   place-items: center;
@@ -547,6 +552,25 @@ textarea {
 .learner-summary > span {
   color: var(--muted);
   font-weight: 700;
+}
+
+.pager {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 16px;
+}
+
+.pager button {
+  width: 42px;
+  min-height: 36px;
+  padding: 0;
+}
+
+.pager button.active {
+  background: var(--teal);
+  border-color: var(--teal);
+  color: white;
 }
 
 .exam-meta span,
