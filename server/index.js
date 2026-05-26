@@ -378,7 +378,12 @@ app.post('/api/documents/upload', upload.single('file'), async (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'file is required' });
 
   const documentId = idForDocument();
-  const generated = await generateFromFile(req.file, documentId);
+  let generated;
+  try {
+    generated = await generateFromFile(req.file, documentId);
+  } catch (error) {
+    return res.status(400).json({ error: error.message || '文档解析失败，请检查文件内容后重试。' });
+  }
   const result = mutateStore((store, helpers) => {
     const department = req.body.department || '全公司';
     const document = {

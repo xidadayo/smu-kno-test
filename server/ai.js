@@ -1,6 +1,13 @@
 import fs from 'node:fs';
+import mammoth from 'mammoth';
+import { PDFParse } from 'pdf-parse';
+import JSZip from 'jszip';
 
 const stages = ['L1', 'L2', 'L3', 'L4'];
+const textExtensions = new Set(['txt', 'md', 'csv', 'html', 'htm']);
+const wordExtensions = new Set(['docx']);
+const pdfExtensions = new Set(['pdf']);
+const pptExtensions = new Set(['pptx']);
 
 function splitContent(content) {
   const normalized = content
@@ -16,13 +23,66 @@ function splitContent(content) {
   return normalized.slice(0, 8);
 }
 
-function readUploadText(file) {
+function stripXml(value) {
+  return value
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+async function readPptxText(filePath) {
+  const zip = await JSZip.loadAsync(fs.readFileSync(filePath));
+  const slideNames = Object.keys(zip.files)
+    .filter((name) => /^ppt\/slides\/slide\d+\.xml$/.test(name))
+    .sort((a, b) => Number(a.match(/slide(\d+)\.xml/)?.[1] || 0) - Number(b.match(/slide(\d+)\.xml/)?.[1] || 0));
+
+  const slides = [];
+  for (const [index, name] of slideNames.entries()) {
+    const xml = await zip.file(name).async('string');
+    const fragments = [...xml.matchAll(/<a:t>([\s\S]*?)<\/a:t>/g)].map((match) => stripXml(match[1])).filter(Boolean);
+    if (fragments.length > 0) {
+      slides.push(`第 ${index + 1} 页：${fragments.join('；')}`);
+    }
+  }
+  return slides.join('\n');
+}
+
+export async function readUploadText(file) {
   const ext = file.originalname.split('.').pop()?.toLowerCase() || 'txt';
-  if (['txt', 'md', 'csv', 'html'].includes(ext)) {
+  if (textExtensions.has(ext)) {
     return fs.readFileSync(file.path, 'utf8').slice(0, 18000);
   }
 
-  return `${file.originalname} 上传成功。当前文件类型需要接入解析器提取正文；请基于文件名生成可审核的初始知识点，并提醒管理员补充来源页码。`;
+  if (wordExtensions.has(ext)) {
+    const result = await mammoth.extractRawText({ path: file.path });
+    return result.value.slice(0, 18000);
+  }
+
+  if (pdfExtensions.has(ext)) {
+    const parser = new PDFParse({ data: fs.readFileSync(file.path) });
+    const result = await parser.getText();
+    await parser.destroy();
+    return result.text.slice(0, 18000);
+  }
+
+  if (pptExtensions.has(ext)) {
+    return (await readPptxText(file.path)).slice(0, 18000);
+  }
+
+  throw new Error(`暂不支持解析 .${ext} 文件，请上传 txt、md、csv、html、docx、pdf 或 pptx。`);
+}
+
+async function extractReadableText(file) {
+  const content = (await readUploadText(file)).trim();
+  if (content.length < 20) {
+    throw new Error(`${file.originalname} 未提取到足够正文，请确认文件不是扫描图片或加密文件。`);
+  }
+  return content;
 }
 
 function normalizeAiPayload(payload, documentId, provider = 'deepseek-v4') {
@@ -74,8 +134,8 @@ function normalizeAiPayload(payload, documentId, provider = 'deepseek-v4') {
   return { knowledgePoints, questions };
 }
 
-export function mockGenerateFromFile(file, documentId) {
-  const content = readUploadText(file);
+export async function mockGenerateFromFile(file, documentId) {
+  const content = await extractReadableText(file);
   const chunks = splitContent(content);
 
   const knowledgePoints = chunks.map((chunk, index) => {
@@ -124,10 +184,10 @@ export async function generateFromFile(file, documentId) {
   const baseUrl = process.env.DEEPSEEK_BASE_URL || 'https://api.deepseek.com';
 
   if (!apiKey) {
-    return { ...mockGenerateFromFile(file, documentId), provider: 'local-mock', model: 'local-mock' };
+    return { ...(await mockGenerateFromFile(file, documentId)), provider: 'local-mock', model: 'local-mock' };
   }
 
-  const content = readUploadText(file);
+  const content = await extractReadableText(file);
   const prompt = [
     '请把企业知识库文档转换成可审核的阶段学习内容和题库。',
     '必须只返回 JSON，不要 Markdown，不要解释。',
@@ -166,7 +226,7 @@ export async function generateFromFile(file, documentId) {
     const parsed = JSON.parse(raw);
     return { ...normalizeAiPayload(parsed, documentId, model), provider: 'deepseek', model };
   } catch (error) {
-    const fallback = mockGenerateFromFile(file, documentId);
+    const fallback = await mockGenerateFromFile(file, documentId);
     return {
       ...fallback,
       provider: 'local-mock',

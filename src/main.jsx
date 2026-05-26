@@ -364,21 +364,28 @@ function Knowledge({ data, onRefresh }) {
   const [title, setTitle] = useState('');
   const [department, setDepartment] = useState('全公司');
   const [busy, setBusy] = useState(false);
+  const [uploadError, setUploadError] = useState('');
   const departments = useMemo(() => ['全公司', ...new Set(data.learners.map((item) => item.department).filter(Boolean))], [data.learners]);
 
   const upload = async (event) => {
     event.preventDefault();
     if (!file) return;
     setBusy(true);
+    setUploadError('');
     const fd = new FormData();
     fd.append('file', file);
     fd.append('title', title || file.name);
     fd.append('department', department);
-    await api('/api/documents/upload', { method: 'POST', body: fd });
-    setBusy(false);
-    setFile(null);
-    setTitle('');
-    onRefresh();
+    try {
+      await api('/api/documents/upload', { method: 'POST', body: fd });
+      setFile(null);
+      setTitle('');
+      onRefresh();
+    } catch (error) {
+      setUploadError(error.message);
+    } finally {
+      setBusy(false);
+    }
   };
 
   return (
@@ -392,10 +399,12 @@ function Knowledge({ data, onRefresh }) {
               <option key={item} value={item}>{item}</option>
             ))}
           </select>
-          <input type="file" onChange={(event) => setFile(event.target.files?.[0])} />
+          <input type="file" accept=".txt,.md,.csv,.html,.htm,.docx,.pdf,.pptx" onChange={(event) => setFile(event.target.files?.[0])} />
           <button className="primary" disabled={!file || busy}>
             {busy ? 'DeepSeek 生成中...' : '上传并生成待审核内容'}
           </button>
+          <small>支持 txt、md、csv、html、Word docx、PDF、PPT pptx，系统会自动提取正文并生成知识点和题库。</small>
+          {uploadError && <div className="form-error">{uploadError}</div>}
         </form>
       </Panel>
 
