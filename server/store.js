@@ -116,6 +116,30 @@ export function readStore() {
     }
   }
 
+  const knowledgeById = new Map(store.knowledgePoints.map((item) => [item.id, item]));
+  for (const question of store.questions) {
+    const kp = knowledgeById.get(question.knowledgePointId);
+    if (kp && (question.stage !== kp.stage || question.difficulty !== kp.difficulty)) {
+      question.stage = kp.stage;
+      question.difficulty = kp.difficulty;
+      changed = true;
+    }
+    if (!Array.isArray(question.options) || question.options.length === 0) {
+      question.options = question.type === 'judge' ? ['正确', '错误'] : ['正确', '错误'];
+      changed = true;
+    }
+    const normalizedAnswer = (Array.isArray(question.answer) ? question.answer : [question.answer])
+      .map(String)
+      .filter((item) => question.options.includes(item));
+    if (normalizedAnswer.length === 0) {
+      question.answer = [question.options[0]];
+      changed = true;
+    } else if (JSON.stringify(question.answer) !== JSON.stringify(normalizedAnswer)) {
+      question.answer = normalizedAnswer;
+      changed = true;
+    }
+  }
+
   for (const user of store.users) {
     if (!user.passwordHash) {
       const fallback = user.role === 'learner' ? '123456' : 'admin123';

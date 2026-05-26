@@ -106,20 +106,24 @@ function normalizeAiPayload(payload, documentId, provider = 'deepseek-v4') {
   });
 
   const kpIds = new Map(knowledgePoints.map((kp) => [kp.title, kp.id]));
+  const kpById = new Map(knowledgePoints.map((kp) => [kp.id, kp]));
   const questions = (payload.questions || []).slice(0, 20).map((item, index) => {
-    const stage = stages.includes(item.stage) ? item.stage : knowledgePoints[index % Math.max(knowledgePoints.length, 1)]?.stage || 'L1';
-    const options = Array.isArray(item.options) && item.options.length > 0 ? item.options.map(String) : ['正确', '错误'];
-    const answer = Array.isArray(item.answer) ? item.answer.map(String) : [String(item.answer || options[0])];
+    const fallbackKp = knowledgePoints[index % Math.max(knowledgePoints.length, 1)];
+    const knowledgePointId = item.knowledgePointId || kpIds.get(item.knowledgePointTitle) || fallbackKp?.id;
+    const linkedKp = kpById.get(knowledgePointId) || fallbackKp;
+    const stage = linkedKp?.stage || (stages.includes(item.stage) ? item.stage : 'L1');
+    const options = normalizeOptions(item.options, item.type);
+    const answer = normalizeAnswer(item.answer, options);
     return {
       id: `q_${documentId}_${index + 1}`,
-      knowledgePointId: item.knowledgePointId || kpIds.get(item.knowledgePointTitle) || knowledgePoints[index % Math.max(knowledgePoints.length, 1)]?.id,
+      knowledgePointId,
       type: item.type || (options.length === 2 && options.includes('正确') ? 'judge' : 'single'),
       title: String(item.title || `题目 ${index + 1}`).slice(0, 200),
       options,
       answer,
       analysis: String(item.analysis || '由 AI 生成，发布前请管理员审核。').slice(0, 300),
       stage,
-      difficulty: stages.includes(item.difficulty) ? item.difficulty : stage,
+      difficulty: linkedKp?.difficulty || (stages.includes(item.difficulty) ? item.difficulty : stage),
       score: Number(item.score || 10),
       confidence: Number(item.confidence || 0.78),
       status: 'pending_review',
@@ -132,6 +136,19 @@ function normalizeAiPayload(payload, documentId, provider = 'deepseek-v4') {
   }
 
   return { knowledgePoints, questions };
+}
+
+function normalizeOptions(options, type) {
+  if (Array.isArray(options) && options.length > 0) {
+    return [...new Set(options.map(String).map((item) => item.trim()).filter(Boolean))];
+  }
+  return type === 'judge' ? ['正确', '错误'] : ['正确', '错误'];
+}
+
+function normalizeAnswer(answer, options) {
+  const values = (Array.isArray(answer) ? answer : [answer]).map(String).map((item) => item.trim()).filter(Boolean);
+  const valid = values.filter((item) => options.includes(item));
+  return valid.length > 0 ? valid : [options[0]];
 }
 
 export async function mockGenerateFromFile(file, documentId) {
@@ -194,6 +211,8 @@ export async function generateFromFile(file, documentId) {
     'JSON 结构：',
     '{"knowledgePoints":[{"title":"","summary":"","keywords":[],"stage":"L1","difficulty":"L1","sourceLocation":"","estimatedMinutes":10,"confidence":0.8}],"questions":[{"knowledgePointTitle":"","type":"single","title":"","options":[],"answer":[],"analysis":"","stage":"L1","difficulty":"L1","score":10,"confidence":0.8}]}',
     '阶段和难度只能使用 L1、L2、L3、L4。',
+    '每道题必须通过 knowledgePointTitle 对应到某一个知识点，题目的 stage 和 difficulty 必须与该知识点一致。',
+    '每道客观题的 answer 必须完全来自 options，不能出现选项外答案。',
     '题型 type 可使用 single、multi、judge、blank、short、case、operation。',
     '生成 4-8 个知识点和 4-8 道客观题，低置信度内容仍需标注 confidence。',
     `文档内容：\n${content}`

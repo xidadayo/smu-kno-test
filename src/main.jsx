@@ -261,14 +261,15 @@ function Dashboard({ data, loading, onRefresh }) {
 
         <Panel title="学员阶段视图" action={<button onClick={onRefresh}>刷新数据</button>}>
           <DataTable
-            columns={['姓名', '部门', '阶段', '难度', '学习进度', '考试', '违规']}
+            columns={['姓名', '部门', '阶段', '学习知识', '学习进度', '考试', '最近成绩', '违规']}
             rows={data.learners.map((item) => [
               item.name,
               item.department,
               item.currentStage,
-              item.difficulty,
+              `${item.stageKnowledgeCompleted || 0}/${item.stageKnowledgeTotal || 0}`,
               <Progress value={item.progressPercent} />,
               statusText(item.latestExamStatus),
+              item.latestScore === null || item.latestScore === undefined ? '-' : `${item.latestScore}分`,
               item.violationCount
             ])}
           />
@@ -660,7 +661,8 @@ function ExamDesk({ data, user, onRefresh }) {
       <Panel title={`${user.name} · ${exam.stage} 阶段考试`} className="wide-panel">
         <div className="exam-meta">
           <span>时长 {exam.durationMinutes} 分钟</span>
-          <span>及格 {exam.passScore} 分</span>
+          <span>题数 {exam.questions?.length || 0}</span>
+          <span>百分制及格 {exam.passScore} 分</span>
           <span>状态 {statusText(exam.status)}</span>
         </div>
         {exam.status === 'pending' ? (
@@ -669,6 +671,7 @@ function ExamDesk({ data, user, onRefresh }) {
               {exam.questions.map((question) => (
                 <article className="question" key={question.id}>
                   <h3>{question.title}</h3>
+                  <small>对应知识点：{question.knowledgePoint?.title || question.knowledgePointId} · {question.stage}</small>
                   {question.options.map((option) => (
                     <label key={option}>
                       <input
@@ -724,7 +727,7 @@ function Monitor({ data }) {
 
       <Panel title="考试结果" className="wide-panel">
         <DataTable
-          columns={['学员', '考试', '题数', '正确', '得分', '结果', '用时', '提交时间']}
+          columns={['学员', '考试', '题数', '正确', '原始分', '百分制', '结果', '用时', '提交时间']}
           rows={attempts.map((attempt) => {
             const exam = data.exams.find((item) => item.id === attempt.examId);
             return [
@@ -732,6 +735,7 @@ function Monitor({ data }) {
               exam ? `${exam.stage} 阶段考试` : attempt.examId,
               attempt.questionCount || exam?.questionIds?.length || 0,
               attempt.correctCount ?? '-',
+              attempt.maxScore ? `${attempt.rawScore || 0}/${attempt.maxScore}` : '-',
               attempt.score,
               statusText(attempt.status),
               `${attempt.durationSeconds || 0} 秒`,

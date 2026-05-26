@@ -57,13 +57,19 @@ function learnerRows(store) {
       const exams = store.examTasks.filter((item) => item.userId === user.id);
       const latestExam = exams[0];
       const violations = store.violations.filter((item) => item.userId === user.id);
+      const stage = progress?.stage || user.stage || 'L1';
+      const completion = stageLearningCompletion(store, user, stage);
+      const latestAttempt = store.examAttempts.find((item) => item.userId === user.id);
       return {
         ...sanitizeLearner(user),
-        progressPercent: progress?.percent || 0,
+        progressPercent: completion.percent || progress?.percent || 0,
         learningStatus: progress?.status || 'not_started',
-        currentStage: progress?.stage || user.stage || 'L1',
+        currentStage: stage,
         difficulty: progress?.difficulty || user.difficulty || 'L1',
         latestExamStatus: latestExam?.status || 'none',
+        latestScore: latestAttempt?.score ?? null,
+        stageKnowledgeTotal: completion.total,
+        stageKnowledgeCompleted: completion.completed,
         violationCount: violations.length
       };
     });
@@ -126,22 +132,65 @@ function currentProgressFor(store, user) {
 }
 
 function availableKnowledgeFor(store, user, stage) {
+  if (!user) return [];
   return store.knowledgePoints.filter(
     (item) => item.status === 'approved' && item.stage === stage && visibleForDepartment(item, user.department)
   );
 }
 
+function stageLearningCompletion(store, user, stage) {
+  const available = availableKnowledgeFor(store, user, stage);
+  const availableIds = new Set(available.map((item) => item.id));
+  const completedIds = new Set(
+    store.learningRecords
+      .filter((item) => item.userId === user?.id && item.stage === stage && item.status === 'completed' && availableIds.has(item.knowledgePointId))
+      .map((item) => item.knowledgePointId)
+  );
+  return {
+    total: available.length,
+    completed: completedIds.size,
+    percent: available.length === 0 ? 0 : Math.round((completedIds.size / available.length) * 100),
+    complete: available.length > 0 && completedIds.size === available.length
+  };
+}
+
+function examQuestionPayload(store, questionId) {
+  const question = store.questions.find((item) => item.id === questionId);
+  if (!question) return null;
+  const knowledgePoint = store.knowledgePoints.find((item) => item.id === question.knowledgePointId);
+  return { ...question, knowledgePoint };
+}
+
 function ensureExamForProgress(store, helpers, progress) {
+  const learner = store.users.find((user) => user.id === progress.userId);
+  const completion = stageLearningCompletion(store, learner, progress.stage);
+  if (!completion.complete) {
+    store.examTasks = store.examTasks.filter(
+      (item) => !(item.userId === progress.userId && item.stage === progress.stage && item.planId === progress.planId && item.status === 'pending')
+    );
+    return null;
+  }
+
   const existingExam = store.examTasks.find(
     (item) => item.userId === progress.userId && item.stage === progress.stage && item.planId === progress.planId && item.status === 'pending'
   );
   if (existingExam) return existingExam;
 
-  const learner = store.users.find((user) => user.id === progress.userId);
   const plan = store.learningPlans.find((item) => item.id === progress.planId);
   const questionCount = Math.max(1, Number(plan?.questionCount || 5));
+  const availableKnowledgeIds = new Set(availableKnowledgeFor(store, learner, progress.stage).map((item) => item.id));
   const questions = store.questions
-    .filter((question) => question.status === 'approved' && question.stage === progress.stage && visibleForDepartment(question, learner?.department))
+    .filter((question) => {
+      const kp = store.knowledgePoints.find((item) => item.id === question.knowledgePointId);
+      return (
+        question.status === 'approved' &&
+        question.stage === progress.stage &&
+        visibleForDepartment(question, learner?.department) &&
+        availableKnowledgeIds.has(question.knowledgePointId) &&
+        kp?.stage === progress.stage &&
+        kp?.status === 'approved'
+      );
+    })
     .map((question) => question.id)
     .slice(0, questionCount);
   const exam = {
@@ -489,10 +538,12 @@ app.post('/api/progress', (req, res) => {
       store.progress.push(progress);
     }
 
-    progress.percent = Math.min(100, Number(req.body.percent ?? progress.percent));
+    const learner = store.users.find((user) => user.id === progress.userId);
+    const completion = stageLearningCompletion(store, learner, progress.stage);
+    progress.percent = completion.total > 0 ? completion.percent : Math.min(100, Number(req.body.percent ?? progress.percent));
     progress.effectiveSeconds += Number(req.body.effectiveSeconds || 0);
     progress.lastPosition = req.body.lastPosition || progress.lastPosition;
-    progress.status = progress.percent >= 100 ? 'completed' : 'learning';
+    progress.status = completion.complete ? 'completed' : 'learning';
     progress.updatedAt = helpers.now();
 
     if (progress.status === 'completed') {
@@ -508,11 +559,17 @@ app.post('/api/progress', (req, res) => {
 app.get('/api/exams', (_req, res) => {
   const store = readStore();
   res.json(
-    store.examTasks.map((exam) => ({
-      ...exam,
-      user: sanitizeUser(store.users.find((user) => user.id === exam.userId)),
-      questions: exam.questionIds.map((qid) => store.questions.find((question) => question.id === qid)).filter(Boolean)
-    }))
+    store.examTasks
+      .filter((exam) => {
+        if (exam.status !== 'pending') return true;
+        const user = store.users.find((item) => item.id === exam.userId);
+        return stageLearningCompletion(store, user, exam.stage).complete;
+      })
+      .map((exam) => ({
+        ...exam,
+        user: sanitizeUser(store.users.find((user) => user.id === exam.userId)),
+        questions: exam.questionIds.map((qid) => examQuestionPayload(store, qid)).filter(Boolean)
+      }))
   );
 });
 
@@ -589,16 +646,11 @@ app.post('/api/my/knowledge/:id/complete', (req, res) => {
       store.progress.unshift(progress);
     }
 
-    const available = availableKnowledgeFor(store, user, kp.stage);
-    const completedIds = new Set(
-      store.learningRecords
-        .filter((item) => item.userId === user.id && item.stage === kp.stage && item.status === 'completed')
-        .map((item) => item.knowledgePointId)
-    );
-    progress.percent = available.length === 0 ? 0 : Math.round((completedIds.size / available.length) * 100);
+    const completion = stageLearningCompletion(store, user, kp.stage);
+    progress.percent = completion.percent;
     progress.effectiveSeconds += Number(body.effectiveSeconds || 180);
     progress.lastPosition = kp.id;
-    progress.status = progress.percent >= 100 ? 'completed' : 'learning';
+    progress.status = completion.complete ? 'completed' : 'learning';
     progress.updatedAt = helpers.now();
 
     let exam = null;
@@ -620,10 +672,11 @@ app.get('/api/my/exams', (req, res) => {
   res.json(
     store.examTasks
       .filter((exam) => exam.userId === user.id)
+      .filter((exam) => exam.status !== 'pending' || stageLearningCompletion(store, user, exam.stage).complete)
       .map((exam) => ({
         ...exam,
         user: sanitizeUser(user),
-        questions: exam.questionIds.map((qid) => store.questions.find((question) => question.id === qid)).filter(Boolean)
+        questions: exam.questionIds.map((qid) => examQuestionPayload(store, qid)).filter(Boolean)
       }))
   );
 });
@@ -635,28 +688,32 @@ app.post('/api/exams/:id/submit', (req, res) => {
     const questions = exam.questionIds.map((qid) => store.questions.find((question) => question.id === qid)).filter(Boolean);
     const body = req.body || {};
     const answers = body.answers || {};
-    const score = questions.reduce((sum, question) => {
+    const graded = questions.map((question) => {
       const given = Array.isArray(answers[question.id]) ? answers[question.id] : [answers[question.id]].filter(Boolean);
       const correct = question.answer.every((item) => given.includes(item)) && given.length === question.answer.length;
-      return sum + (correct ? question.score : 0);
-    }, 0);
-    exam.status = score >= exam.passScore ? 'passed' : 'failed';
+      return { question, given, correct };
+    });
+    const rawScore = graded.reduce((sum, item) => sum + (item.correct ? Number(item.question.score || 0) : 0), 0);
+    const maxScore = questions.reduce((sum, question) => sum + Number(question.score || 0), 0);
+    const score = maxScore > 0 ? Math.round((rawScore / maxScore) * 100) : 0;
+    const correctCount = graded.filter((item) => item.correct).length;
+    exam.status = score >= Number(exam.passScore || 60) ? 'passed' : 'failed';
     exam.submittedAt = helpers.now();
     exam.score = score;
+    exam.rawScore = rawScore;
+    exam.maxScore = maxScore;
     const attempt = {
       id: helpers.id('attempt'),
       examId: exam.id,
       userId: exam.userId,
       answers,
       score,
+      rawScore,
+      maxScore,
       status: exam.status,
       durationSeconds: Number(body.durationSeconds || 0),
       questionCount: questions.length,
-      correctCount: questions.reduce((sum, question) => {
-        const given = Array.isArray(answers[question.id]) ? answers[question.id] : [answers[question.id]].filter(Boolean);
-        const correct = question.answer.every((item) => given.includes(item)) && given.length === question.answer.length;
-        return sum + (correct ? 1 : 0);
-      }, 0),
+      correctCount,
       createdAt: helpers.now()
     };
     store.examAttempts.unshift(attempt);
