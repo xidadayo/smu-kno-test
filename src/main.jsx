@@ -229,7 +229,7 @@ function Login({ onLogin }) {
         </form>
         <div className="login-hints">
           <span>管理员：admin / admin123</span>
-          <span>学员：SMU1001 / 123456</span>
+          <span>学员账号由管理员创建或批量导入</span>
         </div>
       </section>
     </main>
@@ -565,7 +565,7 @@ function LearningDesk({ data, user, onRefresh }) {
           <span>{current.stage}</span>
           <h3>{current.title}</h3>
           <p>{current.summary}</p>
-          <small>来源: {current.sourceLocation} · 预计 {current.estimatedMinutes} 分钟 · {isCompleted ? '已学习' : '未学习'}</small>
+          <small>来源: {current.sourceLocation} · {isCompleted ? '已学习' : '未学习'}</small>
         </article>
         <div className="pager">
           {approved.map((kp, index) => (

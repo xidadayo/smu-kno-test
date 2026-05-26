@@ -16,6 +16,10 @@ const upload = multer({ dest: uploadDir });
 ensureStore();
 
 app.use(cors({ origin: process.env.APP_ORIGIN || true }));
+app.use((_req, res, next) => {
+  res.charset = 'utf-8';
+  next();
+});
 app.use(express.json({ limit: '4mb' }));
 app.use('/uploads', express.static(uploadDir));
 
@@ -39,6 +43,7 @@ const collectionMap = {
   pushRecords: 'pushRecords',
   auditLogs: 'auditLogs'
 };
+const stageOrder = ['L1', 'L2', 'L3', 'L4'];
 
 function userFromRequest(req, store) {
   return store.users.find((user) => user.id === actor(req));
@@ -48,9 +53,9 @@ function learnerRows(store) {
   return store.users
     .filter((user) => user.role === 'learner')
     .map((user) => {
-      const progress = store.progress.find((item) => item.userId === user.id);
+      const progress = currentProgressFor(store, user);
       const exams = store.examTasks.filter((item) => item.userId === user.id);
-      const latestExam = exams.at(-1);
+      const latestExam = exams[0];
       const violations = store.violations.filter((item) => item.userId === user.id);
       return {
         ...sanitizeLearner(user),
@@ -101,6 +106,25 @@ function visibleForDepartment(item, department) {
   return !item.department || item.department === '全公司' || item.department === department;
 }
 
+function planVisibleForUser(plan, user) {
+  return !plan.targetDepartment || plan.targetDepartment === '全公司' || plan.targetDepartment === user.department;
+}
+
+function plansForUser(store, user) {
+  return store.learningPlans.filter((plan) => plan.status === 'active' && planVisibleForUser(plan, user));
+}
+
+function planForUserStage(store, user, stage) {
+  return plansForUser(store, user).find((plan) => (plan.stages || []).includes(stage)) || null;
+}
+
+function currentProgressFor(store, user) {
+  const rows = store.progress
+    .filter((item) => item.userId === user.id)
+    .sort((a, b) => new Date(b.updatedAt || b.createdAt || 0) - new Date(a.updatedAt || a.createdAt || 0));
+  return rows.find((item) => ['learning', 'not_started'].includes(item.status)) || rows[0] || null;
+}
+
 function availableKnowledgeFor(store, user, stage) {
   return store.knowledgePoints.filter(
     (item) => item.status === 'approved' && item.stage === stage && visibleForDepartment(item, user.department)
@@ -108,7 +132,9 @@ function availableKnowledgeFor(store, user, stage) {
 }
 
 function ensureExamForProgress(store, helpers, progress) {
-  const existingExam = store.examTasks.find((item) => item.userId === progress.userId && item.stage === progress.stage);
+  const existingExam = store.examTasks.find(
+    (item) => item.userId === progress.userId && item.stage === progress.stage && item.planId === progress.planId && item.status === 'pending'
+  );
   if (existingExam) return existingExam;
 
   const learner = store.users.find((user) => user.id === progress.userId);
@@ -142,6 +168,93 @@ function ensureExamForProgress(store, helpers, progress) {
     createdAt: helpers.now()
   });
   return exam;
+}
+
+function createOrResetProgress(store, helpers, { user, plan, stage, status = 'learning' }) {
+  let progress = store.progress.find((item) => item.userId === user.id && item.planId === plan?.id && item.stage === stage);
+  if (!progress) {
+    progress = {
+      id: helpers.id('pg'),
+      userId: user.id,
+      planId: plan?.id || null,
+      stage,
+      difficulty: stage,
+      status,
+      percent: 0,
+      effectiveSeconds: 0,
+      lastPosition: null,
+      retryCount: 0,
+      createdAt: helpers.now()
+    };
+    store.progress.unshift(progress);
+  }
+  progress.status = status;
+  progress.percent = 0;
+  progress.effectiveSeconds = status === 'learning' ? 0 : progress.effectiveSeconds || 0;
+  progress.lastPosition = null;
+  progress.updatedAt = helpers.now();
+  return progress;
+}
+
+function resetStageLearningAfterFailure(store, helpers, exam) {
+  const user = store.users.find((item) => item.id === exam.userId);
+  const plan = store.learningPlans.find((item) => item.id === exam.planId);
+  if (!user || !plan) return null;
+
+  store.learningRecords = store.learningRecords.filter(
+    (item) => !(item.userId === user.id && item.planId === plan.id && item.stage === exam.stage)
+  );
+  const progress = createOrResetProgress(store, helpers, { user, plan, stage: exam.stage, status: 'learning' });
+  progress.retryCount = Number(progress.retryCount || 0) + 1;
+  user.stage = exam.stage;
+  user.difficulty = exam.difficulty || exam.stage;
+
+  store.pushRecords.unshift({
+    id: helpers.id('push'),
+    userId: user.id,
+    channel: 'system',
+    title: '考试未通过，已重新推送学习计划',
+    content: `${exam.stage} 阶段考试未通过，请重新完成本阶段全部知识点后再参加考试。`,
+    status: 'created',
+    createdAt: helpers.now()
+  });
+  return progress;
+}
+
+function pushNextStageAfterPass(store, helpers, exam) {
+  const user = store.users.find((item) => item.id === exam.userId);
+  const plan = store.learningPlans.find((item) => item.id === exam.planId);
+  if (!user || !plan) return null;
+
+  const stages = (plan.stages?.length ? plan.stages : stageOrder).filter(Boolean);
+  const currentIndex = stages.indexOf(exam.stage);
+  const nextStage = currentIndex >= 0 ? stages[currentIndex + 1] : stageOrder[stageOrder.indexOf(exam.stage) + 1];
+  if (!nextStage) {
+    store.pushRecords.unshift({
+      id: helpers.id('push'),
+      userId: user.id,
+      channel: 'system',
+      title: '全部阶段已完成',
+      content: `${exam.stage} 阶段考试已通过，当前学习计划已完成全部阶段。`,
+      status: 'created',
+      createdAt: helpers.now()
+    });
+    return null;
+  }
+
+  const nextProgress = createOrResetProgress(store, helpers, { user, plan, stage: nextStage, status: 'learning' });
+  user.stage = nextStage;
+  user.difficulty = nextStage;
+  store.pushRecords.unshift({
+    id: helpers.id('push'),
+    userId: user.id,
+    channel: 'system',
+    title: '考试通过，已推送下一阶段学习计划',
+    content: `${exam.stage} 阶段考试已通过，${nextStage} 阶段学习计划已开放，请完成该阶段全部知识点。`,
+    status: 'created',
+    createdAt: helpers.now()
+  });
+  return nextProgress;
 }
 
 app.get('/api/health', (_req, res) => {
@@ -374,7 +487,7 @@ app.post('/api/progress', (req, res) => {
     progress.percent = Math.min(100, Number(req.body.percent ?? progress.percent));
     progress.effectiveSeconds += Number(req.body.effectiveSeconds || 0);
     progress.lastPosition = req.body.lastPosition || progress.lastPosition;
-    progress.status = progress.percent >= 90 ? 'completed' : 'learning';
+    progress.status = progress.percent >= 100 ? 'completed' : 'learning';
     progress.updatedAt = helpers.now();
 
     if (progress.status === 'completed') {
@@ -402,10 +515,13 @@ app.get('/api/my/learning', (req, res) => {
   const store = readStore();
   const user = userFromRequest(req, store);
   if (!user) return res.status(404).json({ error: 'user not found' });
-  const progress = store.progress.filter((item) => item.userId === user.id);
-  const planIds = new Set(progress.map((item) => item.planId));
-  const plans = store.learningPlans.filter((item) => planIds.has(item.id) || item.status === 'active');
-  const currentStage = progress[0]?.stage || user.stage || 'L1';
+  const progress = store.progress
+    .filter((item) => item.userId === user.id)
+    .sort((a, b) => new Date(b.updatedAt || b.createdAt || 0) - new Date(a.updatedAt || a.createdAt || 0));
+  const plans = plansForUser(store, user);
+  const currentProgress = currentProgressFor(store, user);
+  const firstPlanStage = plans[0]?.stages?.[0];
+  const currentStage = currentProgress?.stage || user.stage || firstPlanStage || 'L1';
   const knowledgePoints = availableKnowledgeFor(store, user, currentStage);
   res.json({
     user: sanitizeUser(user),
@@ -423,7 +539,12 @@ app.post('/api/my/knowledge/:id/complete', (req, res) => {
     const kp = store.knowledgePoints.find((item) => item.id === req.params.id && item.status === 'approved');
     if (!kp || !visibleForDepartment(kp, user.department)) return null;
 
-    const planId = req.body.planId || store.learningPlans.find((plan) => plan.status === 'active')?.id || null;
+    const body = req.body || {};
+    const plan = body.planId
+      ? store.learningPlans.find((item) => item.id === body.planId)
+      : planForUserStage(store, user, kp.stage) || plansForUser(store, user)[0];
+    if (!plan || !planVisibleForUser(plan, user)) return null;
+    const planId = plan.id;
     let record = store.learningRecords.find((item) => item.userId === user.id && item.knowledgePointId === kp.id);
     if (!record) {
       record = {
@@ -434,14 +555,14 @@ app.post('/api/my/knowledge/:id/complete', (req, res) => {
         stage: kp.stage,
         difficulty: kp.difficulty,
         status: 'completed',
-        effectiveSeconds: Number(req.body.effectiveSeconds || 180),
-        startedAt: req.body.startedAt || helpers.now(),
+        effectiveSeconds: Number(body.effectiveSeconds || 180),
+        startedAt: body.startedAt || helpers.now(),
         completedAt: helpers.now()
       };
       store.learningRecords.unshift(record);
     } else {
       record.status = 'completed';
-      record.effectiveSeconds += Number(req.body.effectiveSeconds || 180);
+      record.effectiveSeconds += Number(body.effectiveSeconds || 180);
       record.completedAt = helpers.now();
     }
 
@@ -456,9 +577,11 @@ app.post('/api/my/knowledge/:id/complete', (req, res) => {
         status: 'learning',
         percent: 0,
         effectiveSeconds: 0,
-        lastPosition: null
+        lastPosition: null,
+        retryCount: 0,
+        createdAt: helpers.now()
       };
-      store.progress.push(progress);
+      store.progress.unshift(progress);
     }
 
     const available = availableKnowledgeFor(store, user, kp.stage);
@@ -468,7 +591,7 @@ app.post('/api/my/knowledge/:id/complete', (req, res) => {
         .map((item) => item.knowledgePointId)
     );
     progress.percent = available.length === 0 ? 0 : Math.round((completedIds.size / available.length) * 100);
-    progress.effectiveSeconds += Number(req.body.effectiveSeconds || 180);
+    progress.effectiveSeconds += Number(body.effectiveSeconds || 180);
     progress.lastPosition = kp.id;
     progress.status = progress.percent >= 100 ? 'completed' : 'learning';
     progress.updatedAt = helpers.now();
@@ -505,7 +628,8 @@ app.post('/api/exams/:id/submit', (req, res) => {
     const exam = store.examTasks.find((item) => item.id === req.params.id);
     if (!exam) return null;
     const questions = exam.questionIds.map((qid) => store.questions.find((question) => question.id === qid)).filter(Boolean);
-    const answers = req.body.answers || {};
+    const body = req.body || {};
+    const answers = body.answers || {};
     const score = questions.reduce((sum, question) => {
       const given = Array.isArray(answers[question.id]) ? answers[question.id] : [answers[question.id]].filter(Boolean);
       const correct = question.answer.every((item) => given.includes(item)) && given.length === question.answer.length;
@@ -521,7 +645,7 @@ app.post('/api/exams/:id/submit', (req, res) => {
       answers,
       score,
       status: exam.status,
-      durationSeconds: Number(req.body.durationSeconds || 0),
+      durationSeconds: Number(body.durationSeconds || 0),
       questionCount: questions.length,
       correctCount: questions.reduce((sum, question) => {
         const given = Array.isArray(answers[question.id]) ? answers[question.id] : [answers[question.id]].filter(Boolean);
@@ -531,6 +655,11 @@ app.post('/api/exams/:id/submit', (req, res) => {
       createdAt: helpers.now()
     };
     store.examAttempts.unshift(attempt);
+    if (exam.status === 'passed') {
+      pushNextStageAfterPass(store, helpers, exam);
+    } else {
+      resetStageLearningAfterFailure(store, helpers, exam);
+    }
     logAudit(store, 'exam.submit', actor(req), { examId: exam.id, score });
     return { exam, attempt };
   });
@@ -541,13 +670,14 @@ app.post('/api/exams/:id/submit', (req, res) => {
 app.post('/api/exams/:id/violation', (req, res) => {
   const created = mutateStore((store, helpers) => {
     const exam = store.examTasks.find((item) => item.id === req.params.id);
+    const body = req.body || {};
     const violation = {
       id: helpers.id('vio'),
       examId: req.params.id,
-      userId: exam?.userId || req.body.userId,
-      type: req.body.type || 'unknown',
-      message: req.body.message || '',
-      severity: req.body.severity || 'warning',
+      userId: exam?.userId || body.userId,
+      type: body.type || 'unknown',
+      message: body.message || '',
+      severity: body.severity || 'warning',
       createdAt: helpers.now()
     };
     store.violations.unshift(violation);

@@ -17,7 +17,7 @@ try {
     body: JSON.stringify({ account: 'admin', password: 'admin123' })
   }).then((res) => res.json());
   if (health.status !== 'ok') throw new Error('health check failed');
-  if (!summary.learners || !summary.workflow) throw new Error('summary payload incomplete');
+  if (typeof summary.learners !== 'number' || !summary.workflow) throw new Error('summary payload incomplete');
   if (login.user?.account !== 'admin') throw new Error('login check failed');
   console.log('smoke test passed');
 } finally {
