@@ -1,26 +1,52 @@
 import fs from 'node:fs';
+import path from 'node:path';
 import mammoth from 'mammoth';
 import { PDFParse } from 'pdf-parse';
 import JSZip from 'jszip';
+import { createWorker, setLogging } from 'tesseract.js';
 
 const stages = ['L1', 'L2', 'L3', 'L4'];
 const textExtensions = new Set(['txt', 'md', 'csv', 'html', 'htm']);
 const wordExtensions = new Set(['docx']);
 const pdfExtensions = new Set(['pdf']);
 const pptExtensions = new Set(['pptx']);
+const usefulPdfTextPattern = /[A-Za-z\u4e00-\u9fa5]{3,}/;
+setLogging(false);
 
 function splitContent(content) {
-  const normalized = content
+  const preparedContent = content.includes('第 2 页') ? content.replace(/^第\s*1\s*页[:：]?[\s\S]*?(?=第\s*2\s*页[:：]?)/, '') : content;
+  const meaningfulLines = preparedContent
     .replace(/\r/g, '\n')
-    .split(/\n+|。|\.|；|;/)
+    .split(/\n+/)
     .map((line) => line.trim())
-    .filter(Boolean);
+    .filter(isMeaningfulContentLine);
+  const normalized = meaningfulLines
+    .join('\n')
+    .split(/\n+|。|；|;/)
+    .map((line) => line.trim())
+    .filter(isMeaningfulContentLine);
 
   if (normalized.length === 0) {
     return ['文档已上传，请补充可解析文本后重新生成。'];
   }
 
   return normalized.slice(0, 8);
+}
+
+function isMeaningfulContentLine(line) {
+  if (!line) return false;
+  if (/^第\s*\d+\s*页[:：]?$/.test(line)) return false;
+  if (/^[-–—_=\s|\\\/.,:;'"“”‘’()[\]{}]+$/.test(line)) return false;
+  const letters = (line.match(/[A-Za-z\u4e00-\u9fa5]/g) || []).length;
+  const cjk = (line.match(/[\u4e00-\u9fa5]/g) || []).length;
+  const words = line.match(/[A-Za-z]{3,}/g) || [];
+  const shortWords = line.match(/\b[A-Za-z]{1,2}\b/g) || [];
+  const digits = (line.match(/\d/g) || []).length;
+  const useful = letters + digits;
+  if (cjk >= 6) return true;
+  if (/[\\|_=]{2,}/.test(line) || shortWords.length > 3) return false;
+  if (line.length < 14 || words.length < 3) return false;
+  return useful / line.length >= 0.45;
 }
 
 function stripXml(value) {
@@ -52,6 +78,66 @@ async function readPptxText(filePath) {
   return slides.join('\n');
 }
 
+function cleanPdfText(text) {
+  return text
+    .replace(/--\s*\d+\s+of\s+\d+\s*--/gi, '\n')
+    .replace(/[ \t]+/g, ' ')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+function hasUsefulText(text) {
+  return cleanPdfText(text).split(/\s+/).filter((item) => usefulPdfTextPattern.test(item)).length >= 12;
+}
+
+async function readPdfText(filePath) {
+  const parser = new PDFParse({ data: fs.readFileSync(filePath) });
+  try {
+    const result = await parser.getText();
+    const text = cleanPdfText(result.text || '');
+    if (hasUsefulText(text)) return text.slice(0, 18000);
+  } finally {
+    await parser.destroy();
+  }
+
+  return readPdfWithOcr(filePath);
+}
+
+async function readPdfWithOcr(filePath) {
+  const maxPages = Math.max(1, Number(process.env.PDF_OCR_MAX_PAGES || 24));
+  const desiredWidth = Math.max(1000, Number(process.env.PDF_OCR_WIDTH || 2200));
+  const language = process.env.PDF_OCR_LANG || 'eng';
+  const cachePath = path.resolve(process.env.TESSDATA_CACHE || './.ocr-cache');
+  fs.mkdirSync(cachePath, { recursive: true });
+  const parser = new PDFParse({ data: fs.readFileSync(filePath) });
+  let screenshots;
+  try {
+    screenshots = await parser.getScreenshot({
+      first: maxPages,
+      desiredWidth,
+      imageBuffer: true,
+      imageDataUrl: false
+    });
+  } finally {
+    await parser.destroy();
+  }
+
+  const worker = await createWorker(language, 1, { cachePath });
+  const pages = [];
+  try {
+    for (const page of screenshots.pages || []) {
+      if (!page.data) continue;
+      const result = await worker.recognize(page.data);
+      const text = cleanPdfText(result.data?.text || '');
+      if (text) pages.push(`第 ${page.pageNumber || pages.length + 1} 页：\n${text}`);
+    }
+  } finally {
+    await worker.terminate();
+  }
+
+  return pages.join('\n\n').slice(0, 18000);
+}
+
 export async function readUploadText(file) {
   const ext = file.originalname.split('.').pop()?.toLowerCase() || 'txt';
   if (textExtensions.has(ext)) {
@@ -64,10 +150,7 @@ export async function readUploadText(file) {
   }
 
   if (pdfExtensions.has(ext)) {
-    const parser = new PDFParse({ data: fs.readFileSync(file.path) });
-    const result = await parser.getText();
-    await parser.destroy();
-    return result.text.slice(0, 18000);
+    return readPdfText(file.path);
   }
 
   if (pptExtensions.has(ext)) {
@@ -80,7 +163,7 @@ export async function readUploadText(file) {
 async function extractReadableText(file) {
   const content = (await readUploadText(file)).trim();
   if (content.length < 20) {
-    throw new Error(`${file.originalname} 未提取到足够正文，请确认文件不是扫描图片或加密文件。`);
+    throw new Error(`${file.originalname} 未提取到足够正文，请确认文件不是加密文件；扫描版 PDF 可尝试提高 PDF_OCR_MAX_PAGES 或 PDF_OCR_WIDTH 后重试。`);
   }
   return content;
 }

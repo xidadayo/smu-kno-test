@@ -147,6 +147,7 @@ DEEPSEEK_MODEL=deepseek-v4-pro
 - Word 请使用 `.docx` 格式。
 - PPT 请使用 `.pptx` 格式。
 - PDF 如果是扫描图片或加密文件，可能无法提取正文，需要先 OCR 或转成可复制文本的 PDF。
+- 图片型 PDF 会自动使用 OCR 识别页面文字，默认识别前 24 页，可通过 `.env` 的 `PDF_OCR_MAX_PAGES` 调整。
 
 ### 5.4 审核 AI 生成内容
 
@@ -376,6 +377,8 @@ http://localhost:3001/api/health
 - 文件被加密或损坏。
 - 上传的是旧版 `.doc` 或 `.ppt`，需要另存为 `.docx` 或 `.pptx`。
 - 文档正文太少，无法形成有效知识点。
+
+如果是英文图片型 PDF，可以保持默认 `PDF_OCR_LANG=eng`。如果是中文图片型 PDF，可在 `.env` 中设置支持的 OCR 语言，并适当提高 `PDF_OCR_WIDTH` 获取更清晰的识别结果。
 
 ## 13. 系统验证
 

@@ -72,6 +72,14 @@ DEEPSEEK_MODEL=deepseek-v4-pro
 
 如果不填写 `DEEPSEEK_API_KEY`，系统仍可运行，并使用本地模拟生成待审核知识点和题目。
 
+图片型 PDF 会自动走 OCR 兜底。可选配置：
+
+```bash
+PDF_OCR_LANG=eng
+PDF_OCR_MAX_PAGES=24
+PDF_OCR_WIDTH=2200
+```
+
 ## 验证
 
 ```bash
