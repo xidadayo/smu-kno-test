@@ -1,0 +1,16 @@
+node_modules
+dist
+data
+uploads
+.ocr-cache
+.git
+.env
+*.log
+*.err
+*.traineddata
+framework.docx
+framework.txt
+server-test.log
+server-test.err
+vite-test.log
+npm-debug.log*

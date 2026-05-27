@@ -90,3 +90,14 @@ npm run check
 ```
 
 该命令会构建前端，并调用后端 smoke test 检查核心 API 是否可用。
+
+## Docker 部署
+
+完整 Docker 部署说明见 [DOCKER_DEPLOY.md](./DOCKER_DEPLOY.md)。生产部署建议使用：
+
+```bash
+cp .env.example .env
+docker compose up -d --build
+```
+
+部署时请持久化 `data/`、`uploads/`、`.ocr-cache/`，这样学员数据、上传文档和 OCR 缓存可以迁移到极空间或其他电脑。

@@ -1,10 +1,29 @@
 services:
   smu-kno-test:
     build: .
+    image: smu-kno-test:latest
+    container_name: smu-kno-test
+    restart: unless-stopped
     ports:
-      - "3001:3001"
-    env_file:
-      - .env.example
+      - "${APP_PORT:-3001}:3001"
+    environment:
+      NODE_ENV: production
+      PORT: 3001
+      APP_ORIGIN: "${APP_ORIGIN:-*}"
+      DATA_FILE: /app/data/store.json
+      UPLOAD_DIR: /app/uploads
+      TESSDATA_CACHE: /app/.ocr-cache
+      PDF_OCR_LANG: "${PDF_OCR_LANG:-eng}"
+      PDF_OCR_MAX_PAGES: "${PDF_OCR_MAX_PAGES:-24}"
+      PDF_OCR_WIDTH: "${PDF_OCR_WIDTH:-2200}"
+      KNOWLEDGE_TEXT_LIMIT: "${KNOWLEDGE_TEXT_LIMIT:-80000}"
+      KNOWLEDGE_MAX_POINTS: "${KNOWLEDGE_MAX_POINTS:-120}"
+      KNOWLEDGE_MAX_QUESTIONS: "${KNOWLEDGE_MAX_QUESTIONS:-120}"
+      FEISHU_WEBHOOK_URL: "${FEISHU_WEBHOOK_URL:-}"
+      DEEPSEEK_API_KEY: "${DEEPSEEK_API_KEY:-}"
+      DEEPSEEK_BASE_URL: "${DEEPSEEK_BASE_URL:-https://api.deepseek.com}"
+      DEEPSEEK_MODEL: "${DEEPSEEK_MODEL:-deepseek-v4-pro}"
     volumes:
       - ./data:/app/data
       - ./uploads:/app/uploads
+      - ./.ocr-cache:/app/.ocr-cache
