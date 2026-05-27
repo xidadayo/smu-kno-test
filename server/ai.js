@@ -11,26 +11,43 @@ const wordExtensions = new Set(['docx']);
 const pdfExtensions = new Set(['pdf']);
 const pptExtensions = new Set(['pptx']);
 const usefulPdfTextPattern = /[A-Za-z\u4e00-\u9fa5]{3,}/;
+const extractedTextLimit = () => Math.max(18000, Number(process.env.KNOWLEDGE_TEXT_LIMIT || 80000));
+const maxKnowledgePoints = () => Math.max(12, Number(process.env.KNOWLEDGE_MAX_POINTS || 120));
+const maxQuestions = () => Math.max(20, Number(process.env.KNOWLEDGE_MAX_QUESTIONS || 120));
 setLogging(false);
 
 function splitContent(content) {
-  const preparedContent = content.includes('第 2 页') ? content.replace(/^第\s*1\s*页[:：]?[\s\S]*?(?=第\s*2\s*页[:：]?)/, '') : content;
-  const meaningfulLines = preparedContent
-    .replace(/\r/g, '\n')
-    .split(/\n+/)
-    .map((line) => line.trim())
-    .filter(isMeaningfulContentLine);
-  const normalized = meaningfulLines
-    .join('\n')
-    .split(/\n+|。|；|;/)
-    .map((line) => line.trim())
-    .filter(isMeaningfulContentLine);
+  const normalized = extractContentUnits(content);
 
   if (normalized.length === 0) {
     return ['文档已上传，请补充可解析文本后重新生成。'];
   }
 
-  return normalized.slice(0, 8);
+  return normalized.slice(0, maxKnowledgePoints());
+}
+
+function extractContentUnits(content) {
+  const preparedContent = content.includes('第 2 页') ? content.replace(/^第\s*1\s*页[:：]?[\s\S]*?(?=第\s*2\s*页[:：]?)/, '') : content;
+  const lines = preparedContent
+    .replace(/\r/g, '\n')
+    .split(/\n+/)
+    .map((line) => line.trim())
+    .filter(isMeaningfulContentLine);
+
+  const units = [];
+  let current = '';
+  for (const line of lines) {
+    const next = current ? `${current} ${line}` : line;
+    if (next.length >= 180) {
+      units.push(next.slice(0, 420));
+      current = '';
+    } else {
+      current = next;
+    }
+  }
+  if (current) units.push(current.slice(0, 420));
+
+  return units.length > 0 ? units : lines;
 }
 
 function isMeaningfulContentLine(line) {
@@ -95,7 +112,7 @@ async function readPdfText(filePath) {
   try {
     const result = await parser.getText();
     const text = cleanPdfText(result.text || '');
-    if (hasUsefulText(text)) return text.slice(0, 18000);
+    if (hasUsefulText(text)) return text.slice(0, extractedTextLimit());
   } finally {
     await parser.destroy();
   }
@@ -135,18 +152,18 @@ async function readPdfWithOcr(filePath) {
     await worker.terminate();
   }
 
-  return pages.join('\n\n').slice(0, 18000);
+  return pages.join('\n\n').slice(0, extractedTextLimit());
 }
 
 export async function readUploadText(file) {
   const ext = file.originalname.split('.').pop()?.toLowerCase() || 'txt';
   if (textExtensions.has(ext)) {
-    return fs.readFileSync(file.path, 'utf8').slice(0, 18000);
+    return fs.readFileSync(file.path, 'utf8').slice(0, extractedTextLimit());
   }
 
   if (wordExtensions.has(ext)) {
     const result = await mammoth.extractRawText({ path: file.path });
-    return result.value.slice(0, 18000);
+    return result.value.slice(0, extractedTextLimit());
   }
 
   if (pdfExtensions.has(ext)) {
@@ -154,7 +171,7 @@ export async function readUploadText(file) {
   }
 
   if (pptExtensions.has(ext)) {
-    return (await readPptxText(file.path)).slice(0, 18000);
+    return (await readPptxText(file.path)).slice(0, extractedTextLimit());
   }
 
   throw new Error(`暂不支持解析 .${ext} 文件，请上传 txt、md、csv、html、docx、pdf 或 pptx。`);
@@ -169,7 +186,7 @@ async function extractReadableText(file) {
 }
 
 function normalizeAiPayload(payload, documentId, provider = 'deepseek-v4') {
-  const knowledgePoints = (payload.knowledgePoints || []).slice(0, 12).map((item, index) => {
+  const knowledgePoints = (payload.knowledgePoints || []).slice(0, maxKnowledgePoints()).map((item, index) => {
     const stage = stages.includes(item.stage) ? item.stage : stages[index % stages.length];
     const id = `kp_${documentId}_${index + 1}`;
     return {
@@ -190,7 +207,7 @@ function normalizeAiPayload(payload, documentId, provider = 'deepseek-v4') {
 
   const kpIds = new Map(knowledgePoints.map((kp) => [kp.title, kp.id]));
   const kpById = new Map(knowledgePoints.map((kp) => [kp.id, kp]));
-  const questions = (payload.questions || []).slice(0, 20).map((item, index) => {
+  const questions = (payload.questions || []).slice(0, maxQuestions()).map((item, index) => {
     const fallbackKp = knowledgePoints[index % Math.max(knowledgePoints.length, 1)];
     const knowledgePointId = item.knowledgePointId || kpIds.get(item.knowledgePointTitle) || fallbackKp?.id;
     const linkedKp = kpById.get(knowledgePointId) || fallbackKp;
@@ -219,6 +236,81 @@ function normalizeAiPayload(payload, documentId, provider = 'deepseek-v4') {
   }
 
   return { knowledgePoints, questions };
+}
+
+function enrichWithExtractedCoverage(result, content, documentId, provider) {
+  const units = extractContentUnits(content);
+  const existingText = result.knowledgePoints.map((item) => `${item.title} ${item.summary}`).join('\n').toLowerCase();
+  const existingQuestionKpIds = new Set(result.questions.map((item) => item.knowledgePointId).filter(Boolean));
+  const additions = [];
+
+  for (const unit of units) {
+    if (result.knowledgePoints.length + additions.length >= maxKnowledgePoints()) break;
+    const cleanUnit = cleanExtractedText(unit);
+    const signature = cleanUnit.slice(0, 28).toLowerCase();
+    if (signature && existingText.includes(signature)) continue;
+    const index = result.knowledgePoints.length + additions.length;
+    const stage = stages[index % stages.length];
+    additions.push({
+      id: `kp_${documentId}_raw_${additions.length + 1}`,
+      documentId,
+      title: makeTitle(cleanUnit, additions.length + 1),
+      summary: cleanUnit.slice(0, 420),
+      keywords: extractKeywords(cleanUnit),
+      stage,
+      difficulty: stage,
+      sourceLocation: `原文内容 ${additions.length + 1}`,
+      estimatedMinutes: Math.max(5, Math.ceil(unit.length / 90)),
+      confidence: 0.7,
+      status: 'pending_review',
+      generatedBy: `${provider}-coverage`
+    });
+  }
+
+  const knowledgePoints = [...result.knowledgePoints, ...additions];
+  const supplementalQuestions = additions
+    .filter((kp) => !existingQuestionKpIds.has(kp.id))
+    .slice(0, Math.max(0, maxQuestions() - result.questions.length))
+    .map((kp, index) => ({
+      id: `q_${documentId}_raw_${index + 1}`,
+      knowledgePointId: kp.id,
+      type: 'single',
+      title: `关于“${kp.title}”，以下哪项来自该知识点？`,
+      options: [kp.summary.slice(0, 90), '与该知识点无关的内容', '仅用于系统占位的说明', '无需学习该知识点'],
+      answer: [kp.summary.slice(0, 90)],
+      analysis: '题目由系统根据原文覆盖内容自动生成，发布前请管理员审核。',
+      stage: kp.stage,
+      difficulty: kp.difficulty,
+      score: 10,
+      confidence: kp.confidence,
+      status: 'pending_review',
+      generatedBy: `${provider}-coverage`
+    }));
+
+  return { knowledgePoints, questions: [...result.questions, ...supplementalQuestions] };
+}
+
+function makeTitle(text, index) {
+  const cleaned = cleanExtractedText(text)
+    .replace(/^[^A-Za-z0-9\u4e00-\u9fa5]+/, '')
+    .replace(/\s+([,.;:!?])/g, '$1')
+    .trim();
+  const words = cleaned.split(/\s+/).filter((word) => /[A-Za-z0-9\u4e00-\u9fa5]/.test(word));
+  const title = words.slice(0, 10).join(' ') || `原文知识点 ${index}`;
+  return title.slice(0, 80);
+}
+
+function extractKeywords(text) {
+  return [...new Set((text.match(/[\u4e00-\u9fa5]{2,}|[A-Za-z]{3,}/g) || []).map((item) => item.trim()).filter(Boolean))].slice(0, 6);
+}
+
+function cleanExtractedText(text) {
+  return String(text || '')
+    .replace(/[^\S\r\n]+/g, ' ')
+    .replace(/\s+([,.;:!?，。；：！？])/g, '$1')
+    .replace(/[|_~`^]{2,}/g, ' ')
+    .replace(/\s{2,}/g, ' ')
+    .trim();
 }
 
 function normalizeOptions(options, type) {
@@ -297,7 +389,9 @@ export async function generateFromFile(file, documentId) {
     '每道题必须通过 knowledgePointTitle 对应到某一个知识点，题目的 stage 和 difficulty 必须与该知识点一致。',
     '每道客观题的 answer 必须完全来自 options，不能出现选项外答案。',
     '题型 type 可使用 single、multi、judge、blank、short、case、operation。',
-    '生成 4-8 个知识点和 4-8 道客观题，低置信度内容仍需标注 confidence。',
+    '尽量完整覆盖文档内容，不要只做摘要。请按章节、页面、业务流程、产品类别、合作伙伴、工厂能力、认证、联系方式等可学习信息拆成细颗粒知识点。',
+    '生成 20-60 个知识点；如果文档内容较少，也要覆盖所有有效段落。每个知识点 summary 应保留原文关键信息，不要省略重要名称、数字、年份、客户、产品和认证。',
+    '生成与知识点匹配的客观题，题目数量尽量接近知识点数量，低置信度内容仍需标注 confidence。',
     `文档内容：\n${content}`
   ].join('\n');
 
@@ -326,9 +420,9 @@ export async function generateFromFile(file, documentId) {
     const data = await response.json();
     const raw = data.choices?.[0]?.message?.content;
     const parsed = JSON.parse(raw);
-    return { ...normalizeAiPayload(parsed, documentId, model), provider: 'deepseek', model };
+    return { ...enrichWithExtractedCoverage(normalizeAiPayload(parsed, documentId, model), content, documentId, 'deepseek'), provider: 'deepseek', model };
   } catch (error) {
-    const fallback = await mockGenerateFromFile(file, documentId);
+    const fallback = enrichWithExtractedCoverage(await mockGenerateFromFile(file, documentId), content, documentId, 'local-mock');
     return {
       ...fallback,
       provider: 'local-mock',
