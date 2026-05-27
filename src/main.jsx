@@ -775,8 +775,10 @@ function DataCenter({ data, onRefresh }) {
   const names = Object.keys(collectionLabels).filter((name) => Array.isArray(collections[name]));
   const [activeCollection, setActiveCollection] = useState(names[0] || 'users');
   const [editing, setEditing] = useState(null);
-  const [draft, setDraft] = useState('');
+  const [draft, setDraft] = useState({});
   const records = collections[activeCollection] || [];
+  const currentRecord = records.find((record) => record.id === editing);
+  const editableFields = currentRecord ? Object.keys(currentRecord).filter((key) => key !== 'passwordHash') : [];
 
   useEffect(() => {
     if (!names.includes(activeCollection) && names[0]) setActiveCollection(names[0]);
@@ -784,17 +786,16 @@ function DataCenter({ data, onRefresh }) {
 
   const startEdit = (record) => {
     setEditing(record.id);
-    setDraft(JSON.stringify(record, null, 2));
+    setDraft(record);
   };
 
   const saveEdit = async () => {
-    const payload = JSON.parse(draft);
     await api(`/api/admin/${activeCollection}/${editing}`, {
       method: 'PATCH',
-      body: JSON.stringify(payload)
+      body: JSON.stringify(draft)
     });
     setEditing(null);
-    setDraft('');
+    setDraft({});
     onRefresh();
   };
 
@@ -834,9 +835,19 @@ function DataCenter({ data, onRefresh }) {
         </div>
       </Panel>
 
-      {editing && (
-        <Panel title="编辑 JSON">
-          <textarea className="json-editor" value={draft} onChange={(event) => setDraft(event.target.value)} />
+      {editing && currentRecord && (
+        <Panel title={`编辑${collectionLabels[activeCollection]}`}>
+          <div className="friendly-editor">
+            {editableFields.map((key) => (
+              <FriendlyField
+                fieldKey={key}
+                key={key}
+                value={draft[key]}
+                readOnly={isReadOnlyField(key)}
+                onChange={(value) => setDraft({ ...draft, [key]: value })}
+              />
+            ))}
+          </div>
           <div className="action-row">
             <button className="primary" onClick={saveEdit}>保存修改</button>
             <button onClick={() => setEditing(null)}>取消</button>
@@ -845,6 +856,112 @@ function DataCenter({ data, onRefresh }) {
       )}
     </section>
   );
+}
+
+function FriendlyField({ fieldKey, value, readOnly, onChange }) {
+  const label = dataFieldLabel(fieldKey);
+  const type = Array.isArray(value) ? 'array' : typeof value;
+  const displayValue = fieldToInputValue(value);
+
+  if (readOnly) {
+    return (
+      <label className="friendly-field readonly">
+        <span>{label}</span>
+        <input value={displayValue || '-'} disabled />
+      </label>
+    );
+  }
+
+  if (type === 'boolean') {
+    return (
+      <label className="friendly-field">
+        <span>{label}</span>
+        <select value={String(Boolean(value))} onChange={(event) => onChange(event.target.value === 'true')}>
+          <option value="true">是</option>
+          <option value="false">否</option>
+        </select>
+      </label>
+    );
+  }
+
+  if (type === 'number') {
+    return (
+      <label className="friendly-field">
+        <span>{label}</span>
+        <input type="number" value={Number.isFinite(value) ? value : 0} onChange={(event) => onChange(Number(event.target.value))} />
+      </label>
+    );
+  }
+
+  if (type === 'array') {
+    return (
+      <label className="friendly-field span-2">
+        <span>{label}</span>
+        <textarea value={displayValue} onChange={(event) => onChange(inputValueToField(event.target.value, value))} />
+        <small>每行一项。题目选项、答案、阶段等列表会按行保存。</small>
+      </label>
+    );
+  }
+
+  if (type === 'object' && value !== null) {
+    return (
+      <label className="friendly-field span-2">
+        <span>{label}</span>
+        <textarea value={displayValue} onChange={(event) => onChange(inputValueToField(event.target.value, value))} />
+        <small>复杂字段按“键: 值”逐行编辑。</small>
+      </label>
+    );
+  }
+
+  if (isLongTextField(fieldKey, value)) {
+    return (
+      <label className="friendly-field span-2">
+        <span>{label}</span>
+        <textarea value={displayValue} onChange={(event) => onChange(event.target.value)} />
+      </label>
+    );
+  }
+
+  return (
+    <label className="friendly-field">
+      <span>{label}</span>
+      <input value={displayValue} onChange={(event) => onChange(event.target.value)} />
+    </label>
+  );
+}
+
+function isReadOnlyField(key) {
+  return ['id', 'createdAt', 'updatedAt', 'reviewedAt', 'submittedAt', 'completedAt', 'startedAt', 'filePath'].includes(key);
+}
+
+function isLongTextField(key, value) {
+  return ['summary', 'analysis', 'content', 'message', 'aiError'].includes(key) || String(value || '').length > 80;
+}
+
+function fieldToInputValue(value) {
+  if (Array.isArray(value)) return value.map((item) => (typeof item === 'object' ? objectToLines(item) : String(item))).join('\n');
+  if (value && typeof value === 'object') return objectToLines(value);
+  return value ?? '';
+}
+
+function inputValueToField(text, original) {
+  if (Array.isArray(original)) {
+    return text.split(/\n+/).map((item) => item.trim()).filter(Boolean);
+  }
+  if (original && typeof original === 'object') {
+    return Object.fromEntries(
+      text
+        .split(/\n+/)
+        .map((line) => line.split(/[:：]/))
+        .filter((parts) => parts.length >= 2)
+        .map(([key, ...rest]) => [key.trim(), rest.join(':').trim()])
+    );
+  }
+  return text;
+}
+
+function objectToLines(value) {
+  return Object.entries(value || {}).map(([key, item]) => `${key}: ${item}`).join('\n');
 }
 
 function Panel({ title, action, children, className = '' }) {
@@ -926,6 +1043,78 @@ function fieldLabel(key) {
     feishuUserId: '飞书 User ID',
     initialPassword: '初始密码'
   }[key];
+}
+
+function dataFieldLabel(key) {
+  return {
+    id: '系统编号',
+    name: '姓名/名称',
+    title: '标题',
+    account: '登录账号',
+    role: '角色',
+    department: '归属部门',
+    targetDepartment: '学习对象',
+    position: '岗位',
+    feishuUserId: '飞书 User ID',
+    status: '状态',
+    initialPassword: '初始密码',
+    documentId: '关联文档',
+    knowledgePointId: '关联知识点',
+    userId: '学员',
+    planId: '学习计划',
+    examId: '考试任务',
+    type: '类型',
+    originalName: '原始文件名',
+    filePath: '文件路径',
+    uploadedBy: '上传人',
+    aiProvider: 'AI 服务',
+    aiModel: 'AI 模型',
+    aiError: 'AI 错误',
+    summary: '摘要',
+    keywords: '关键词',
+    stage: '阶段',
+    stages: '阶段列表',
+    difficulty: '难度',
+    sourceLocation: '来源位置',
+    estimatedMinutes: '预计时长',
+    confidence: '置信度',
+    generatedBy: '生成来源',
+    options: '选项',
+    answer: '答案',
+    analysis: '解析',
+    score: '分值',
+    pushMode: '推送模式',
+    pushCycle: '推送周期',
+    autoExam: '自动考试',
+    completionRule: '完成条件',
+    questionCount: '考试题数',
+    passScore: '及格分',
+    durationMinutes: '考试时长',
+    percent: '学习进度',
+    effectiveSeconds: '有效学习秒数',
+    lastPosition: '最后位置',
+    retryCount: '重学次数',
+    questionIds: '题目列表',
+    answers: '作答记录',
+    correctCount: '正确题数',
+    rawScore: '原始得分',
+    maxScore: '满分',
+    durationSeconds: '用时秒数',
+    channel: '推送渠道',
+    content: '内容',
+    message: '说明',
+    severity: '级别',
+    action: '操作',
+    actorId: '操作人',
+    detail: '详情',
+    createdAt: '创建时间',
+    updatedAt: '更新时间',
+    reviewedAt: '审核时间',
+    reviewedBy: '审核人',
+    submittedAt: '提交时间',
+    startedAt: '开始时间',
+    completedAt: '完成时间'
+  }[key] || key;
 }
 
 function roleText(role) {
